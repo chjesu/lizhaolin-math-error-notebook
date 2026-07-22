@@ -45,6 +45,12 @@ When many item-level reviews are already complete, place their question IDs and
 review paths in one manifest and call `verify-review-batch`. It invokes the same
 per-item verifier and does not relax any checklist or mathematical-review rule.
 
+To reduce repeated model output, a reviewed item may first be written in a concise
+decisions file and expanded with `prepare-review-batch`. Each passing item must still
+set `checks_confirmed: true` and provide its independently derived answer, solution,
+answer/solution checks, and any corrected tags. The expander only copies deterministic
+question metadata and creates canonical review files; it never changes the database.
+
 `pass` and `corrected` can promote only when every checklist item is true and an independent answer/solution is present. `needs_revision` and `reject` are logged but remain unverified. Internally, promotion uses the same field validation as `annotate --verify`.
 
 For older records, structural features may be populated deterministically without changing verification status:

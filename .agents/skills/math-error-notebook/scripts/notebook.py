@@ -1824,6 +1824,80 @@ def apply_verification_review_batch(
     }
 
 
+def prepare_verification_reviews(
+    conn: sqlite3.Connection,
+    decisions_path: Path,
+    out_dir: Path,
+) -> dict[str, Any]:
+    """Expand concise model decisions into canonical item-level review files."""
+    payload = json.loads(decisions_path.read_text(encoding="utf-8"))
+    items = payload.get("items") if isinstance(payload, dict) else None
+    reviewer = str((payload or {}).get("reviewer") or "").strip()
+    if not reviewer or not isinstance(items, list):
+        raise ValueError("decisions require reviewer and an items array")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    manifest_items: list[dict[str, str]] = []
+    for item in items:
+        question_id = str((item or {}).get("question_id") or "").strip()
+        verdict = str((item or {}).get("verdict") or "").strip()
+        if not question_id or verdict not in {"pass", "corrected", "needs_revision", "reject"}:
+            raise ValueError("each decision requires question_id and a valid verdict")
+        packet = audit_item(conn, question_id)
+        question = packet["question"]
+        review: dict[str, Any] = {
+            "question_id": question_id,
+            "verdict": verdict,
+            "reviewer": reviewer,
+            "review_note": str(item.get("review_note") or "").strip(),
+            "packet_sha256": packet["packet_sha256"],
+        }
+        if verdict in {"pass", "corrected"}:
+            if item.get("checks_confirmed") is not True:
+                raise ValueError(f"{question_id}: checks_confirmed must be true")
+            review.update({
+                "checklist": {
+                    "stem_complete": True,
+                    "source_checked": True,
+                    "duplicate_checked": True,
+                    "answer_derived": True,
+                    "solution_checked": True,
+                },
+                "independent_answer": str(item.get("independent_answer") or "").strip(),
+                "independent_solution": str(item.get("independent_solution") or "").strip(),
+                "answer_check": str(item.get("answer_check") or "").strip(),
+                "solution_check": str(item.get("solution_check") or "").strip(),
+                "knowledge_codes": item.get("knowledge_codes") or question["knowledge_codes"],
+                "target_causes": item.get("target_causes") or question["target_causes"],
+                "feature_codes": item.get("feature_codes") or question["feature_codes"],
+                "grade": item.get("grade", question["grade"]),
+                "difficulty": item.get("difficulty", question["difficulty"]),
+                "question_type": item.get("question_type") or question["question_type"],
+                "correction": item.get("correction") or {},
+            })
+        safe_id = re.sub(r"[^0-9A-Za-z._-]+", "_", question_id)
+        review_path = out_dir / f"{safe_id}.review.json"
+        review_path.write_text(
+            json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        manifest_items.append({
+            "question_id": question_id,
+            "review": review_path.name,
+        })
+    manifest_path = out_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps({
+            "schema": "math-verification-review-batch/v1",
+            "items": manifest_items,
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return {
+        "prepared": len(manifest_items),
+        "manifest": str(manifest_path.resolve()),
+        "database_modified": False,
+    }
+
+
 def repair_embedded_options(
     conn: sqlite3.Connection,
     verified_only: bool,
@@ -2089,6 +2163,7 @@ AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
     "verify": {
         "commands": [
             "prepare-audit-batch --source-name <source> --limit <n> --out-dir <dir> --json",
+            "prepare-review-batch <concise-decisions.json> --out-dir <dir> --json",
             "verify-item <question-id> <review.json> --json",
             "verify-review-batch <manifest.json> --json",
         ],
@@ -2479,6 +2554,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("manifest", type=Path)
     p.add_argument("--json", action="store_true")
 
+    p = sub.add_parser("prepare-review-batch", help="expand concise decisions into canonical reviews")
+    p.add_argument("decisions", type=Path)
+    p.add_argument("--out-dir", type=Path, required=True)
+    p.add_argument("--json", action="store_true")
+
     p = sub.add_parser("backfill-features", help="infer auditable structural features for existing questions")
     p.add_argument("--verified-only", action="store_true")
     p.add_argument("--json", action="store_true")
@@ -2627,6 +2707,8 @@ def main(argv: list[str] | None = None) -> int:
                 payload = apply_verification_review(conn, args.question_id, args.review)
             elif args.command == "verify-review-batch":
                 payload = apply_verification_review_batch(conn, args.manifest)
+            elif args.command == "prepare-review-batch":
+                payload = prepare_verification_reviews(conn, args.decisions, args.out_dir)
             elif args.command == "backfill-features":
                 payload = backfill_question_features(conn, args.verified_only)
             elif args.command == "repair-embedded-options":

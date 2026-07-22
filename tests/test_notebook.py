@@ -147,7 +147,8 @@ class NotebookTests(unittest.TestCase):
         self.assertNotIn("answer", rows[0])
 
     def test_question_detail_loads_one_full_item_without_raw_by_default(self):
-        question_id = self.conn.execute("SELECT id FROM questions LIMIT 1").fetchone()[0]
+        row = self.conn.execute("SELECT id,grade FROM questions LIMIT 1").fetchone()
+        question_id = row["id"]
         item = notebook.question_detail(self.conn, question_id)
         self.assertIn("answer", item)
         self.assertIn("solution", item)
@@ -526,6 +527,33 @@ class NotebookTests(unittest.TestCase):
         self.assertEqual(result["verified"], 1)
         self.assertEqual(result["needs_revision"], 1)
         self.assertEqual(result["failed"], 0)
+
+    def test_prepare_review_batch_expands_concise_decision_without_writing_db(self):
+        row = self.conn.execute("SELECT id,grade FROM questions LIMIT 1").fetchone()
+        question_id = row["id"]
+        before = self.conn.execute("SELECT COUNT(*) FROM verification_reviews").fetchone()[0]
+        decisions = self.root / "decisions.json"
+        decisions.write_text(json.dumps({
+            "reviewer": "unit-test",
+            "items": [{
+                "question_id": question_id,
+                "verdict": "pass",
+                "checks_confirmed": True,
+                "independent_answer": "独立答案",
+                "independent_solution": "独立推导过程",
+                "answer_check": "match",
+                "solution_check": "match",
+                "review_note": "逐项检查完成",
+            }],
+        }, ensure_ascii=False), encoding="utf-8")
+        out_dir = self.root / "expanded-reviews"
+        result = notebook.prepare_verification_reviews(self.conn, decisions, out_dir)
+        review = json.loads(next(out_dir.glob("*.review.json")).read_text(encoding="utf-8"))
+        after = self.conn.execute("SELECT COUNT(*) FROM verification_reviews").fetchone()[0]
+        self.assertEqual(result["prepared"], 1)
+        self.assertTrue(review["checklist"]["answer_derived"])
+        self.assertEqual(review["grade"], row["grade"])
+        self.assertEqual(before, after)
 
     def test_structural_features_are_used_in_recommendation_reason(self):
         notebook.import_records(

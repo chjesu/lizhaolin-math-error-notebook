@@ -150,6 +150,7 @@ flowchart LR
 | 审核队列 | `audit-queue` | 精简列出未验证题，可按来源过滤 |
 | 审核包 | `audit-item` | 汇总一题的内容、来源、问题、近重复项和审核要求 |
 | 审核脚手架 | `prepare-audit-batch` | 生成逐题审核包和 verdict=pending 的审核 JSON，不修改数据库 |
+| 精简审核扩展 | `prepare-review-batch` | 将模型逐题给出的精简决策扩展为完整审核 JSON，不替代数学判断、不写库 |
 | 结构化验证 | `verify-item` | 接受独立审核 JSON；逐题记录并在通过时提升状态 |
 | 批量提交审核 | `verify-review-batch` | 逐项复用 `verify-item` 质量门提交审核文件，只压缩命令输出，不批量放宽验证 |
 | 特征回填 | `backfill-features` | 幂等推断题型结构特征，不改变验证状态 |
@@ -168,7 +169,7 @@ flowchart LR
 - 错题与复习：`create_review_cycle`、`render_error_markdown`、`validate_error_analysis`、`record_error`、`fetch_error`、`delete_error`、`review_due`、`mark_review`、`record_attempt`
 - 推荐：`compact_recommendations`、`question_feature_codes`、`backfill_question_features`、`error_feature_codes`、`recommend`、`recommendation_packet`、`assign_recommendations`
 - 检索与统计：`stats`、`coverage`、`list_knowledge_points`、`list_cause_codes`、`list_feature_codes`、`question_detail`、`search_questions`
-- 审核与修复：`annotate_question`、`question_issue_codes`、`near_duplicate_candidates`、`audit_item`、`prepare_audit_batch`、`apply_verification_review`、`apply_verification_review_batch`、`repair_embedded_options`、`audit_queue`、`audit_summary`
+- 审核与修复：`annotate_question`、`question_issue_codes`、`near_duplicate_candidates`、`audit_item`、`prepare_audit_batch`、`prepare_verification_reviews`、`apply_verification_review`、`apply_verification_review_batch`、`repair_embedded_options`、`audit_queue`、`audit_summary`
 - 启动与交接：`doctor`、`agent_context`、`handoff_snapshot`、`_git_summary`
 - CLI：`print_output`、`build_parser`、`main`
 
@@ -336,7 +337,7 @@ python -B .agents\skills\math-error-notebook\scripts\notebook.py agent-context -
 - 判题：`grade-preview → grade-commit`
 - 推荐：`recommend-packet → 模型复核 → assign-recommendations`
 - 批量 DOCX：`import_recent_docx_batch.py → audit_recent_docx_batch.py`
-- 验证：`prepare-audit-batch → 模型逐题填写 → verify-item`；大量已完成审核文件可一次调用 `verify-review-batch`
+- 验证：`prepare-audit-batch → 模型输出精简决策 → prepare-review-batch → verify-review-batch`
 - 交接：`handoff`
 
 尚未程序化、也不应伪自动化的部分：照片内容理解、第一处实质性错误定位、独立数学推导、答案/解析逻辑判断、推荐题真实相关性复核。模型行为标准案例集仍待建立。

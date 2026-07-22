@@ -6,12 +6,16 @@ from __future__ import annotations
 import argparse
 import hashlib
 import html
+import importlib.util
 import itertools
 import json
+import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +25,14 @@ SKILL_DIR = SCRIPT_DIR.parent
 PROJECT_ROOT = SKILL_DIR.parents[2]
 DEFAULT_DB = PROJECT_ROOT / "data" / "math_notebook.db"
 DEFAULT_CONFIG = PROJECT_ROOT / "config" / "math-error-notebook.json"
+LOCAL_PDF_RUNTIME = PROJECT_ROOT / "runtime" / "pdf"
+PDF_REQUIREMENTS = PROJECT_ROOT / "requirements-pdf.txt"
+MPL_CONFIG_DIR = PROJECT_ROOT / "tmp" / "pdfs" / "matplotlib"
+
+if LOCAL_PDF_RUNTIME.is_dir() and str(LOCAL_PDF_RUNTIME) not in sys.path:
+    sys.path.insert(0, str(LOCAL_PDF_RUNTIME))
+MPL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(MPL_CONFIG_DIR))
 
 
 def bundled_python() -> Path | None:
@@ -31,15 +43,27 @@ def bundled_python() -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def ensure_reportlab() -> None:
-    try:
-        import reportlab  # noqa: F401
-    except ModuleNotFoundError:
-        python = bundled_python()
-        if not python or Path(sys.executable).resolve() == python.resolve():
-            raise RuntimeError("reportlab is unavailable and bundled Python was not found")
+def missing_pdf_modules() -> list[str]:
+    required = {"reportlab": "reportlab", "Pillow": "PIL", "matplotlib": "matplotlib"}
+    return [name for name, module in required.items() if importlib.util.find_spec(module) is None]
+
+
+def ensure_pdf_runtime() -> None:
+    missing = missing_pdf_modules()
+    if not missing:
+        return
+    python = bundled_python()
+    if python and Path(sys.executable).resolve() != python.resolve():
         completed = subprocess.run([str(python), str(Path(__file__).resolve()), *sys.argv[1:]])
         raise SystemExit(completed.returncode)
+    install = (
+        f'"{sys.executable}" -m pip install --target "{LOCAL_PDF_RUNTIME}" '
+        f'-r "{PDF_REQUIREMENTS}"'
+    )
+    raise RuntimeError(
+        "PDF runtime is incomplete (missing: " + ", ".join(missing) + "). "
+        "Install the project dependencies once with: " + install
+    )
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -92,20 +116,41 @@ def _cause_name(cause_code: str | None) -> str:
         return cause_code
 
 
-MATH_CACHE_DIR = PROJECT_ROOT / "output" / "pdf" / "math"
-_MATH_REGISTRY: dict[str, str] = {}
+MATH_CACHE_DIR = PROJECT_ROOT / "tmp" / "pdfs" / "math"
+MATH_CACHE_VERSION = "v2"
+_MATH_REGISTRY: dict[str, tuple[str, bool]] = {}
 _MATH_COUNTER = itertools.count()
 _HAS_CJK = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿＀-￯]")
 
 
-def _register_math(latex: str) -> str:
+def _register_math(latex: str, display: bool = False) -> str:
     token = f"ZZMATH{next(_MATH_COUNTER):04d}ZZ"
-    _MATH_REGISTRY[token] = latex
+    _MATH_REGISTRY[token] = (latex, display)
     return token
 
 
+def _is_escaped(text: str, index: int) -> bool:
+    backslashes = 0
+    index -= 1
+    while index >= 0 and text[index] == "\\":
+        backslashes += 1
+        index -= 1
+    return bool(backslashes % 2)
+
+
+def _find_math_close(text: str, start: int, close: str) -> int:
+    index = start
+    while True:
+        index = text.find(close, index)
+        if index < 0:
+            return -1
+        if not _is_escaped(text, index):
+            return index
+        index += len(close)
+
+
 def _extract_math(text: str) -> str:
-    """Replace ``$...$`` segments and bare ``\\sqrt{...}`` with unique placeholders.
+    """Replace common LaTeX delimiters and bare ``\\sqrt{...}`` with placeholders.
 
     Placeholders survive ``_latex_to_text`` and ``html.escape`` untouched and are
     later swapped for inline mathtext images inside ``paragraph_text``, so all
@@ -114,19 +159,34 @@ def _extract_math(text: str) -> str:
     """
     out: list[str] = []
     i = 0
-    while True:
-        j = text.find("$", i)
-        if j < 0:
-            out.append(text[i:])
-            break
-        k = text.find("$", j + 1)
-        if k < 0:  # unpaired dollar: keep the remainder literal
-            out.append(text[i:])
-            break
-        out.append(text[i:j])
-        latex = text[j + 1:k]
-        out.append(_register_math(latex) if latex.strip() else "")
-        i = k + 1
+    while i < len(text):
+        if text.startswith(r"\$", i):
+            out.append("ZZLITERALDOLLARZZ")
+            i += 2
+            continue
+        opener = closer = ""
+        display = False
+        if text.startswith("$$", i):
+            opener = closer = "$$"
+            display = True
+        elif text.startswith(r"\[", i):
+            opener, closer, display = r"\[", r"\]", True
+        elif text.startswith(r"\(", i):
+            opener, closer = r"\(", r"\)"
+        elif text[i] == "$" and not _is_escaped(text, i):
+            opener = closer = "$"
+        if not opener:
+            out.append(text[i])
+            i += 1
+            continue
+        k = _find_math_close(text, i + len(opener), closer)
+        if k < 0:
+            out.append(opener)
+            i += len(opener)
+            continue
+        latex = text[i + len(opener):k]
+        out.append(_register_math(latex, display) if latex.strip() else "")
+        i = k + len(closer)
     value = "".join(out)
 
     token = "\\sqrt{"
@@ -160,28 +220,31 @@ def _extract_math(text: str) -> str:
 
 def _render_math_image(latex: str, font_size: float) -> tuple[str, float, float]:
     """Render one math segment with matplotlib mathtext; return (url, w_pt, h_pt)."""
-    key = hashlib.sha256(f"{latex}|{font_size:.2f}".encode("utf-8")).hexdigest()[:16]
+    import matplotlib
+    key = hashlib.sha256(
+        f"{MATH_CACHE_VERSION}|{matplotlib.__version__}|{latex}|{font_size:.2f}".encode("utf-8")
+    ).hexdigest()[:16]
     MATH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     out = MATH_CACHE_DIR / f"math-{key}.png"
     if not out.is_file():
-        import matplotlib
         matplotlib.use("Agg")
         from matplotlib import pyplot as plt
         fig = plt.figure(figsize=(0.01, 0.01))
-        fig.text(0, 0, f"${latex}$", fontsize=font_size)
-        fig.savefig(out, dpi=300, bbox_inches="tight", pad_inches=0.012, transparent=True)
+        fig.text(0, 0, "$" + latex + "$", fontsize=font_size)
+        fig.savefig(out, dpi=360, bbox_inches="tight", pad_inches=0.012, transparent=True)
         plt.close(fig)
     from PIL import Image
     with Image.open(out) as im:
         w_px, h_px = im.size
     url = out.resolve().as_posix()
-    return url, w_px * 72.0 / 300.0, h_px * 72.0 / 300.0
+    return url, w_px * 72.0 / 360.0, h_px * 72.0 / 360.0
 
 
 def _math_img_tag(placeholder: str, font_size: float) -> str:
-    latex = _MATH_REGISTRY.get(placeholder)
-    if latex is None:
+    registered = _MATH_REGISTRY.get(placeholder)
+    if registered is None:
         return placeholder
+    latex, display = registered
     # Segments mathtext cannot handle (CJK text, unsupported constructs) fall
     # back to the plain-text conversion for that segment only.
     if _HAS_CJK.search(latex):
@@ -190,16 +253,20 @@ def _math_img_tag(placeholder: str, font_size: float) -> str:
         url, w_pt, h_pt = _render_math_image(latex, font_size)
     except Exception:
         return html.escape(_latex_to_text(latex))
-    # Drop the image slightly below the text baseline so it sits naturally.
-    valign = -(h_pt * 0.22)
-    return (
+    max_w = 455.0 if display else 435.0
+    max_h = font_size * (2.15 if display else 1.45)
+    scale = min(1.0, max_w / w_pt, max_h / h_pt)
+    w_pt, h_pt = w_pt * scale, h_pt * scale
+    valign = -(font_size * 0.18)
+    tag = (
         f'<img src="{url}" width="{w_pt:.1f}" height="{h_pt:.1f}" '
         f'valign="{valign:.1f}"/>'
     )
+    return f"<br/>{tag}<br/>" if display else tag
 
 
 def clean_math(text: str | None) -> str:
-    return _latex_to_text(_extract_math(text or ""))
+    return _latex_to_text(_extract_math(text or "")).replace("ZZLITERALDOLLARZZ", "$")
 
 
 def _latex_to_text(value: str) -> str:
@@ -272,6 +339,63 @@ def split_stem_images(text: str | None) -> tuple[str, list[str]]:
     return cleaned, paths
 
 
+def prepare_diagram_image(
+    path: Path,
+    temp_dir: Path,
+    max_width_pt: float,
+    max_height_pt: float,
+) -> tuple[Path, float, float] | None:
+    """Crop empty margins and return a DPI-aware, never-upscaled diagram size."""
+    if not path.is_file():
+        return None
+    try:
+        from PIL import Image, ImageChops
+
+        with Image.open(path) as source:
+            source.load()
+            dpi_info = source.info.get("dpi", (144.0, 144.0))
+            if not isinstance(dpi_info, (tuple, list)) or len(dpi_info) < 2:
+                dpi_info = (144.0, 144.0)
+            dpi_x, dpi_y = float(dpi_info[0]), float(dpi_info[1])
+            if not 60.0 <= dpi_x <= 600.0:
+                dpi_x = 144.0
+            if not 60.0 <= dpi_y <= 600.0:
+                dpi_y = 144.0
+
+            rgba = source.convert("RGBA")
+            canvas = Image.new("RGBA", rgba.size, "white")
+            canvas.alpha_composite(rgba)
+            rgb = canvas.convert("RGB")
+            white = Image.new("RGB", rgb.size, "white")
+            mask = ImageChops.difference(rgb, white).convert("L").point(
+                lambda pixel: 255 if pixel > 12 else 0
+            )
+            bbox = mask.getbbox()
+            if bbox:
+                padding = 8
+                left = max(0, bbox[0] - padding)
+                top = max(0, bbox[1] - padding)
+                right = min(rgb.width, bbox[2] + padding)
+                bottom = min(rgb.height, bbox[3] + padding)
+                rgb = rgb.crop((left, top, right, bottom))
+            if rgb.width <= 0 or rgb.height <= 0:
+                return None
+
+            digest = hashlib.sha256(
+                f"{path.resolve()}|{path.stat().st_mtime_ns}|diagram-v2".encode("utf-8")
+            ).hexdigest()[:16]
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            prepared = temp_dir / f"diagram-{digest}.png"
+            rgb.save(prepared, format="PNG", dpi=(dpi_x, dpi_y), optimize=True)
+    except Exception:
+        return None
+
+    natural_width = rgb.width * 72.0 / dpi_x
+    natural_height = rgb.height * 72.0 / dpi_y
+    scale = min(1.0, max_width_pt / natural_width, max_height_pt / natural_height)
+    return prepared, natural_width * scale, natural_height * scale
+
+
 def concise_solution(text: str | None) -> str:
     value = text or ""
     if "完整解答" in value:
@@ -279,10 +403,32 @@ def concise_solution(text: str | None) -> str:
     return clean_math(value)
 
 
+def truncate_clean_text(text: str | None, limit: int) -> tuple[str, bool]:
+    """Truncate cleaned text without splitting an embedded math placeholder."""
+    value = clean_math(text)
+    if len(value) <= limit:
+        return value, False
+    pieces = re.split(r"(ZZMATH\d+ZZ)", value)
+    output: list[str] = []
+    remaining = limit
+    for piece in pieces:
+        if not piece or remaining <= 0:
+            continue
+        if re.fullmatch(r"ZZMATH\d+ZZ", piece):
+            if len(piece) > remaining:
+                break
+            output.append(piece)
+            remaining -= len(piece)
+        else:
+            output.append(piece[:remaining])
+            remaining -= min(len(piece), remaining)
+    return "".join(output).rstrip(), True
+
+
 def paragraph_text(text: str | None, font_size: float = 11.0) -> str:
     escaped = html.escape(clean_math(text)).replace("\n", "<br/>")
     return re.sub(
-        r"ZZMATH\d{4}ZZ",
+        r"ZZMATH\d+ZZ",
         lambda match: _math_img_tag(match.group(0), font_size),
         escaped,
     )
@@ -348,10 +494,10 @@ def create_pdf(
     )
     body = ParagraphStyle(
         "body-cn", parent=styles["Normal"], fontName=font, fontSize=11,
-        leading=18, textColor=colors.HexColor("#101828"), spaceAfter=3 * mm,
+        leading=22, textColor=colors.HexColor("#101828"), spaceAfter=3 * mm,
     )
     meta = ParagraphStyle(
-        "meta-cn", parent=body, fontSize=8.5, leading=13,
+        "meta-cn", parent=body, fontSize=8.5, leading=15,
         textColor=colors.HexColor("#667085"), spaceAfter=4 * mm,
     )
 
@@ -363,9 +509,12 @@ def create_pdf(
         canvas.drawRightString(192 * mm, 12 * mm, f"第 {doc.page} 页")
         canvas.restoreState()
 
-    # 题图：相对路径相对项目根目录解析，限制在版心内等比缩放。
-    max_img_w = 150 * mm
-    max_img_h = 78 * mm
+    # 题图：裁掉空白边、按 DPI 换算物理尺寸、只缩小不放大。
+    max_img_w = 110 * mm
+    max_img_h = 65 * mm
+    pdf_tmp_root = PROJECT_ROOT / "tmp" / "pdfs"
+    pdf_tmp_root.mkdir(parents=True, exist_ok=True)
+    diagram_temp_dir = Path(tempfile.mkdtemp(prefix="diagrams-", dir=pdf_tmp_root))
 
     def image_flowable(rel_path: str):
         path = Path(rel_path)
@@ -373,23 +522,23 @@ def create_pdf(
             path = PROJECT_ROOT / rel_path
         if not path.is_file():
             return None
-        try:
-            from PIL import Image as PILImage
-            with PILImage.open(path) as im:
-                w_px, h_px = im.size
-        except Exception:
+        prepared = prepare_diagram_image(path, diagram_temp_dir, max_img_w, max_img_h)
+        if prepared is None:
             return None
-        if w_px <= 0 or h_px <= 0:
-            return None
-        scale = min(max_img_w / w_px, max_img_h / h_px, 2.0)
-        return RLImage(str(path), width=w_px * scale, height=h_px * scale)
+        prepared_path, width, height = prepared
+        image = RLImage(str(prepared_path), width=width, height=height)
+        image.hAlign = "CENTER"
+        return image
 
     def text_flowables(text: str | None, style, font_size: float = 11.0, prefix: str = ""):
         cleaned, img_paths = split_stem_images(text)
         flows = [Paragraph(prefix + paragraph_text(cleaned, font_size), style)]
         for rel in img_paths:
             flowable = image_flowable(rel)
-            flows.append(flowable if flowable is not None else Paragraph("［题图缺失，见原卷］", meta))
+            if flowable is None:
+                flows.append(Paragraph("［题图缺失，见原卷］", meta))
+            else:
+                flows.extend([Spacer(1, 2 * mm), flowable, Spacer(1, 3 * mm)])
         return flows
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -436,9 +585,9 @@ def create_pdf(
             if row["rank"] > 1:
                 story.append(CondPageBreak(100 * mm))
             solution_stripped, solution_images = split_stem_images(row["solution"])
-            solution = concise_solution(solution_stripped)
-            if len(solution) > solution_chars:
-                solution = solution[:solution_chars].rstrip() + "……（完整解析保存在题库中）"
+            solution, truncated = truncate_clean_text(solution_stripped, solution_chars)
+            if truncated:
+                solution += "……（完整解析保存在题库中）"
             story.extend([
                 Paragraph(f"{row['rank']}　{row['question_id']}", heading),
                 Paragraph(f"<b>答案：</b>{paragraph_text(row['answer'])}", body),
@@ -448,7 +597,10 @@ def create_pdf(
                 flowable = image_flowable(rel)
                 story.append(flowable if flowable is not None else Paragraph("［题图缺失，见原卷］", meta))
 
-    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    try:
+        doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    finally:
+        shutil.rmtree(diagram_temp_dir, ignore_errors=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -471,7 +623,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    ensure_reportlab()
+    ensure_pdf_runtime()
     config = load_config(args.config)
     output = args.output or (PROJECT_ROOT / "output" / "pdf" / f"{args.error_id}-practice.pdf")
     error, items, knowledge_names = load_items(args.db, args.error_id)

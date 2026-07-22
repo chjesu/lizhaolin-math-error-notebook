@@ -402,14 +402,42 @@ class NotebookTests(unittest.TestCase):
         self.assertEqual(
             [practice_sheet._MATH_REGISTRY[t] for t in tokens],
             [
-                r"|MN|=2\sqrt{r^{2}-d^{2}}",
-                r"S_{\triangle AMN}=\frac{1}{2}|MN|d",
-                r"\angle ACB=\frac{\pi}{2}",
+                (r"|MN|=2\sqrt{r^{2}-d^{2}}", False),
+                (r"S_{\triangle AMN}=\frac{1}{2}|MN|d", False),
+                (r"\angle ACB=\frac{\pi}{2}", False),
             ],
         )
         single = practice_sheet.clean_math(r"$S=\frac12 ABd$")
         self.assertRegex(single, r"^ZZMATH\d{4}ZZ$")
-        self.assertEqual(practice_sheet._MATH_REGISTRY[single], r"S=\frac12 ABd")
+        self.assertEqual(practice_sheet._MATH_REGISTRY[single], (r"S=\frac12 ABd", False))
+
+    def test_practice_sheet_supports_common_math_delimiters_and_escaped_dollar(self):
+        rendered = practice_sheet.clean_math(
+            r"价格为 \$5，行内 \(x+1\)，展示 \[\frac{1}{2}\]，以及 $$y^2$$。"
+        )
+        tokens = re.findall(r"ZZMATH\d+ZZ", rendered)
+        self.assertEqual(len(tokens), 3)
+        self.assertIn("$5", rendered)
+        registered = [practice_sheet._MATH_REGISTRY[token] for token in tokens]
+        self.assertEqual(
+            registered,
+            [("x+1", False), (r"\frac{1}{2}", True), ("y^2", True)],
+        )
+
+    def test_practice_sheet_truncation_keeps_math_token_atomic(self):
+        tokenized = practice_sheet.clean_math(r"前文 $\frac{1}{2}$ 后文")
+        token = re.search(r"ZZMATH\d+ZZ", tokenized).group(0)
+        truncated, changed = practice_sheet.truncate_clean_text(tokenized, len("前文 ") + 2)
+        self.assertTrue(changed)
+        self.assertNotIn("ZZMATH", truncated)
+        self.assertNotIn(token[:5], truncated)
+
+    def test_practice_sheet_renders_uncached_formula(self):
+        latex = r"\frac{987654321}{\sqrt{123456789}}"
+        url, width, height = practice_sheet._render_math_image(latex, 11.37)
+        self.assertTrue(Path(url).is_file())
+        self.assertGreater(width, 0)
+        self.assertGreater(height, 0)
 
     def test_practice_sheet_renders_sqrt_as_inline_image(self):
         html_text = practice_sheet.paragraph_text(r"最短路径为 $\sqrt{41}-1$")
@@ -473,6 +501,24 @@ class NotebookTests(unittest.TestCase):
         self.assertEqual(paths, ["data/imports/x/media/image1.png", "a b.png"])
         self.assertNotIn("![", cleaned)
         self.assertNotIn("题图见原题", practice_sheet.clean_math(cleaned))
+
+    def test_practice_sheet_diagram_is_cropped_and_never_upscaled(self):
+        from PIL import Image as PILImage, ImageDraw
+
+        source = self.root / "diagram-with-margin.png"
+        image = PILImage.new("RGB", (600, 400), "white")
+        ImageDraw.Draw(image).rectangle((260, 170, 340, 230), outline="black", width=4)
+        image.save(source)
+        prepared_dir = self.root / "prepared"
+        result = practice_sheet.prepare_diagram_image(source, prepared_dir, 500, 500)
+        self.assertIsNotNone(result)
+        prepared, width, height = result
+        self.assertTrue(prepared.is_file())
+        with PILImage.open(prepared) as cropped:
+            self.assertLess(cropped.width, 120)
+            self.assertLess(cropped.height, 100)
+        self.assertLessEqual(width, 60)
+        self.assertLessEqual(height, 50)
 
     def test_practice_sheet_embeds_stem_diagram(self):
         from PIL import Image as PILImage

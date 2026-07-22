@@ -17,6 +17,12 @@ python -B <skill-dir>\scripts\notebook.py import-url "https://..." --source-name
 
 External questions remain unverified by default. An imported `verified` field is ignored as evidence.
 
+For a user-authorized date range of DOCX exams, reuse `scripts/import_recent_docx_batch.py`.
+It performs source/file idempotency checks and orchestrates the existing OMML extractor,
+builder, and `import-file`; it never verifies imported questions. Then run
+`scripts/audit_recent_docx_batch.py` to build all item packets and route structural
+exceptions without consuming model context.
+
 ## Two-stage compact audit workflow
 
 1. Check the canonical DB with `bank-info --json`.
@@ -34,6 +40,10 @@ python -B <skill-dir>\scripts\notebook.py audit-item <id> --out data/audits/pack
 ```powershell
 python -B <skill-dir>\scripts\notebook.py verify-item <id> data/audits/reviews/<id>.json --json
 ```
+
+When many item-level reviews are already complete, place their question IDs and
+review paths in one manifest and call `verify-review-batch`. It invokes the same
+per-item verifier and does not relax any checklist or mathematical-review rule.
 
 `pass` and `corrected` can promote only when every checklist item is true and an independent answer/solution is present. `needs_revision` and `reject` are logged but remain unverified. Internally, promotion uses the same field validation as `annotate --verify`.
 

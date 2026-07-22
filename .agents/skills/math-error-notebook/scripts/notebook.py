@@ -1255,6 +1255,23 @@ def stats(conn: sqlite3.Connection) -> dict[str, Any]:
     return result
 
 
+def list_sources(conn: sqlite3.Connection, text: str | None = None) -> list[dict[str, Any]]:
+    clauses = ["1=1"]
+    params: list[Any] = []
+    if text:
+        clauses.append("s.name LIKE ?")
+        params.append(f"%{text}%")
+    return [dict(row) for row in conn.execute(
+        f"""SELECT s.name,s.url,s.license,s.rights_confirmed,
+                   COUNT(q.id) AS questions,
+                   SUM(CASE WHEN q.verified=1 THEN 1 ELSE 0 END) AS verified
+            FROM sources s LEFT JOIN questions q ON q.source_name=s.name
+            WHERE {' AND '.join(clauses)}
+            GROUP BY s.id ORDER BY s.name""",
+        params,
+    )]
+
+
 def bank_info(conn: sqlite3.Connection, db_path: Path) -> dict[str, Any]:
     """Return the identity and health of the selected question bank."""
     resolved = db_path.resolve()
@@ -1754,6 +1771,51 @@ def apply_verification_review(
     }
 
 
+def apply_verification_review_batch(
+    conn: sqlite3.Connection,
+    manifest_path: Path,
+) -> dict[str, Any]:
+    """Apply item-level review files through the canonical verifier with compact output."""
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    items = manifest.get("items") if isinstance(manifest, dict) else None
+    if not isinstance(items, list):
+        raise ValueError("review manifest must contain an items array")
+    results: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    for item in items:
+        question_id = str((item or {}).get("question_id") or "").strip()
+        review_value = str((item or {}).get("review") or "").strip()
+        if not question_id or not review_value:
+            failures.append({
+                "question_id": question_id,
+                "error": "question_id and review are required",
+            })
+            continue
+        review_path = Path(review_value)
+        if not review_path.is_absolute():
+            review_path = manifest_path.parent / review_path
+        try:
+            result = apply_verification_review(conn, question_id, review_path)
+            results.append({
+                "question_id": question_id,
+                "verdict": result["verdict"],
+                "verified": int(result["verified"]),
+                "review_id": result["review_id"],
+            })
+        except (OSError, ValueError, json.JSONDecodeError, sqlite3.Error) as exc:
+            failures.append({"question_id": question_id, "error": str(exc)})
+    return {
+        "processed": len(results),
+        "verified": sum(item["verified"] for item in results),
+        "needs_revision": sum(
+            item["verdict"] == "needs_revision" for item in results
+        ),
+        "rejected": sum(item["verdict"] == "reject" for item in results),
+        "failed": len(failures),
+        "failures": failures,
+    }
+
+
 def repair_embedded_options(
     conn: sqlite3.Connection,
     verified_only: bool,
@@ -2019,6 +2081,7 @@ AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
         "commands": [
             "prepare-audit-batch --source-name <source> --limit <n> --out-dir <dir> --json",
             "verify-item <question-id> <review.json> --json",
+            "verify-review-batch <manifest.json> --json",
         ],
         "required_reference": "references/import-and-verification.md",
     },
@@ -2340,6 +2403,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--full", action="store_true", help="return full question rows")
     p.add_argument("--json", action="store_true")
 
+    p = sub.add_parser("sources", help="list compact source records and question counts")
+    p.add_argument("--text")
+    p.add_argument("--json", action="store_true")
+
     p = sub.add_parser("question", help="show one question in full")
     p.add_argument("question_id")
     p.add_argument("--raw", action="store_true", help="include original raw import JSON")
@@ -2397,6 +2464,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("verify-item", help="apply one structured independent review and optionally verify")
     p.add_argument("question_id")
     p.add_argument("review", type=Path)
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("verify-review-batch", help="apply item-level review files from one manifest")
+    p.add_argument("manifest", type=Path)
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("backfill-features", help="infer auditable structural features for existing questions")
@@ -2520,6 +2591,8 @@ def main(argv: list[str] | None = None) -> int:
                 payload = {"attempt_id": record_attempt(conn, args)}
             elif args.command == "search":
                 payload = search_questions(conn, args)
+            elif args.command == "sources":
+                payload = list_sources(conn, args.text)
             elif args.command == "question":
                 payload = question_detail(conn, args.question_id, args.raw)
             elif args.command == "knowledge":
@@ -2543,6 +2616,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
             elif args.command == "verify-item":
                 payload = apply_verification_review(conn, args.question_id, args.review)
+            elif args.command == "verify-review-batch":
+                payload = apply_verification_review_batch(conn, args.manifest)
             elif args.command == "backfill-features":
                 payload = backfill_question_features(conn, args.verified_only)
             elif args.command == "repair-embedded-options":

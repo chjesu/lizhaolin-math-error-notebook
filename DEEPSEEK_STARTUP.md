@@ -42,7 +42,8 @@ python -B .agents\skills\math-error-notebook\scripts\notebook.py agent-context -
 ```text
 判题：grade-preview → grade-commit
 推荐：recommend-packet → 模型复核相关性 → assign-recommendations → practice_sheet.py
-验证：prepare-audit-batch → 模型逐题完成 review JSON → verify-item
+批量 DOCX：import_recent_docx_batch.py → audit_recent_docx_batch.py
+验证：prepare-audit-batch → 模型逐题完成 review JSON → verify-item；大量已审核文件用 verify-review-batch 提交
 交接：handoff --json
 ```
 

@@ -130,6 +130,7 @@ flowchart LR
 | 来源登记 | `register-exam-dir` | 登记本地 PDF 试卷目录并生成来源清单 |
 | 来源同步 | `sync-source-manifest` | 将来源清单同步到题库来源记录 |
 | 来源修复 | `update-source` | 修正一个来源的 URL、许可、授权确认和备注 |
+| 来源查询 | `sources` | 精简列出来源及题目/已验证数量，供批量导入幂等判断 |
 | 错题保存 | `record-error` | 保存结构化错因、图片、知识点和复习周期 |
 | 错题预检/保存 | `grade-preview` / `grade-commit` | 写库前验证错因 JSON；粗心必须有直接证据；提交复用同一质量门 |
 | 错题撤销 | `delete-error` | 删除误保存的错题及受控派生文件 |
@@ -149,6 +150,7 @@ flowchart LR
 | 审核包 | `audit-item` | 汇总一题的内容、来源、问题、近重复项和审核要求 |
 | 审核脚手架 | `prepare-audit-batch` | 生成逐题审核包和 verdict=pending 的审核 JSON，不修改数据库 |
 | 结构化验证 | `verify-item` | 接受独立审核 JSON；逐题记录并在通过时提升状态 |
+| 批量提交审核 | `verify-review-batch` | 逐项复用 `verify-item` 质量门提交审核文件，只压缩命令输出，不批量放宽验证 |
 | 特征回填 | `backfill-features` | 幂等推断题型结构特征，不改变验证状态 |
 | 选项修复 | `repair-embedded-options` | 从原始记录或题干回填 A-D 结构化选项 |
 | 审核汇总 | `audit-summary` | 按来源统计缺解析、异常公式、占位答案、图形依赖等 |
@@ -161,11 +163,11 @@ flowchart LR
 
 - 数据库与标识：`default_database_path`、`connect`、`init_database`、`fingerprint`、`slug_id`、`bank_info`
 - 题目标准化：`infer_knowledge`、`infer_question_features`、`validate_feature_codes`、`normalize_difficulty`、`normalize_question`、`insert_question`
-- 导入与来源：`import_records`、`read_json_records`、`fetch_json`、`register_exam_directory`、`sync_source_manifest`、`update_source_metadata`
+- 导入与来源：`import_records`、`read_json_records`、`fetch_json`、`register_exam_directory`、`sync_source_manifest`、`update_source_metadata`、`list_sources`
 - 错题与复习：`create_review_cycle`、`render_error_markdown`、`validate_error_analysis`、`record_error`、`fetch_error`、`delete_error`、`review_due`、`mark_review`、`record_attempt`
 - 推荐：`compact_recommendations`、`question_feature_codes`、`backfill_question_features`、`error_feature_codes`、`recommend`、`recommendation_packet`、`assign_recommendations`
 - 检索与统计：`stats`、`coverage`、`list_knowledge_points`、`list_cause_codes`、`list_feature_codes`、`question_detail`、`search_questions`
-- 审核与修复：`annotate_question`、`question_issue_codes`、`near_duplicate_candidates`、`audit_item`、`prepare_audit_batch`、`apply_verification_review`、`repair_embedded_options`、`audit_queue`、`audit_summary`
+- 审核与修复：`annotate_question`、`question_issue_codes`、`near_duplicate_candidates`、`audit_item`、`prepare_audit_batch`、`apply_verification_review`、`apply_verification_review_batch`、`repair_embedded_options`、`audit_queue`、`audit_summary`
 - 启动与交接：`doctor`、`agent_context`、`handoff_snapshot`、`_git_summary`
 - CLI：`print_output`、`build_parser`、`main`
 
@@ -309,8 +311,9 @@ math-error-notebook/
 | 推荐同类题 | `recommend`、`assign-recommendations` | 新推荐器或直接 SQL |
 | 输出/打印练习 | `practice_sheet.py` | 新通用 PDF 生成器 |
 | 导入 JSON/CSV | `import-file` | 新数据库导入器 |
-| 导入 DOCX | `extract_docx_omml.py` + `build_omml_exam_import.py` + `import-file` | 第三套 OMML 转换器 |
-| 审核未验证题 | `audit-item` + `verify-item` | 批量 verified 更新脚本 |
+| 导入 DOCX | `extract_docx_omml.py` + `build_omml_exam_import.py` + `import-file`；日期批次用 `scripts/import_recent_docx_batch.py` 编排 | 第三套 OMML 转换器 |
+| 审核未验证题 | `prepare-audit-batch` + `verify-item`；已完成人工审核的清单可用 `verify-review-batch` | 批量 verified 更新脚本 |
+| DOCX 结构预检 | `scripts/audit_recent_docx_batch.py` | 让模型重复检查字段、图片路径和格式 |
 | 修复题目字段 | `annotate` 或审核 JSON 的 correction | 直接 UPDATE SQL |
 | 查询题库状态 | `bank-info`、`audit-summary`、`coverage`、`stats` | 递归扫描和临时报表脚本 |
 | 分析其他数据库 | `audit_deepseek_db.py` 只读报告 | 自动合库程序 |
@@ -331,7 +334,8 @@ python -B .agents\skills\math-error-notebook\scripts\notebook.py agent-context -
 
 - 判题：`grade-preview → grade-commit`
 - 推荐：`recommend-packet → 模型复核 → assign-recommendations`
-- 验证：`prepare-audit-batch → 模型逐题填写 → verify-item`
+- 批量 DOCX：`import_recent_docx_batch.py → audit_recent_docx_batch.py`
+- 验证：`prepare-audit-batch → 模型逐题填写 → verify-item`；大量已完成审核文件可一次调用 `verify-review-batch`
 - 交接：`handoff`
 
 尚未程序化、也不应伪自动化的部分：照片内容理解、第一处实质性错误定位、独立数学推导、答案/解析逻辑判断、推荐题真实相关性复核。模型行为标准案例集仍待建立。

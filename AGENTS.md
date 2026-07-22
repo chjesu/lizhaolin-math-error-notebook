@@ -9,4 +9,4 @@
 - `2026-07-19-g11-beijing-20` 批次经用户确认来源十分可靠，可免除每题的完整独立推演核算；但仍须逐题核查题干、选项、答案与解析逻辑自洽、标签、来源和重复项，并通过 `audit-item → verify-item` 正式记录。该豁免不得扩展到其他来源。
 - 除上述指定批次外，外部 `verified`、来源信誉、抽样或批量 SQL 均不能替代题干、答案、解析、标签、来源和重复项的逐题审核及 `verify-item`。
 - 仅导入开放授权或用户确认有权使用的材料；不得绕过登录、付费墙或访问限制。
-- 可机械化步骤必须优先调用 `notebook.py`：错题先 `grade-preview` 再 `grade-commit`，候选推荐用 `recommend-packet`，审核准备用 `prepare-audit-batch`，交接用 `handoff`；不得让模型重复拼装这些固定结构。
+- 可机械化步骤必须优先调用现有脚本：错题先 `grade-preview` 再 `grade-commit`，候选推荐用 `recommend-packet`，审核准备用 `prepare-audit-batch`，大量已完成的逐题审核用 `verify-review-batch` 提交，交接用 `handoff`；按日期导入 DOCX 用 `scripts/import_recent_docx_batch.py`，结构预检用 `scripts/audit_recent_docx_batch.py`。不得让模型重复拼装这些固定结构，也不得用批处理放宽逐题验证质量门。

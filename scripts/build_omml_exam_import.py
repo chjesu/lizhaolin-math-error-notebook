@@ -30,18 +30,17 @@ def infer_knowledge(text: str) -> list[str]:
         ("trig-definition", ("任意角", "终边", "三角函数值", "同角")),
         ("sine-cosine-laws", ("正弦定理", "余弦定理", "解三角形", "三角形面积")),
         ("function-properties", ("函数", "奇偶", "单调", "定义域", "值域")),
-        ("line-circle", ("直线", "圆", "斜率")),
-        ("sequences", ("数列", "递推", "前n项")),
-        ("counting-binomial", ("排列", "组合", "二项式", "计数原理")),
-    ]
-        ("conic-ellipse", ("椭圆", "椭")),
-        ("conic-hyperbola", ("双曲线",)),
-        ("conic-parabola", ("抛物线",)),
+        ("conic-ellipse", ("椭圆", "离心率", "焦点")),
+        ("conic-hyperbola", ("双曲线", "渐近线")),
+        ("conic-parabola", ("抛物线", "准线")),
         ("space-vectors", ("空间向量", "法向量", "方向向量")),
         ("derivatives", ("导数", "切线", "极值", "单调性")),
         ("derivative-applications", ("导数的应用", "恒成立", "存在性")),
         ("arithmetic-sequences", ("等差数列", "公差")),
         ("geometric-sequences", ("等比数列", "公比")),
+        ("line-circle", ("直线", "圆", "斜率")),
+        ("sequences", ("数列", "递推", "前n项")),
+        ("counting-binomial", ("排列", "组合", "二项式", "计数原理")),
     ]
     # Rule order matters: conic-ellipse must match before line-circle (圆 in 椭圆)
     # line-circle: match standalone 圆 (not preceded by 椭/圆柱/圆锥) or 直线

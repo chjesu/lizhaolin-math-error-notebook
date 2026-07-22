@@ -159,6 +159,15 @@ class NotebookTests(unittest.TestCase):
         self.assertTrue(any(item["code"] == "line-circle" for item in points))
         causes = notebook.list_cause_codes("概念")
         self.assertEqual(causes, [{"code": "concept_confusion", "name": "概念理解不准确"}])
+        self.conn.execute(
+            "INSERT INTO sources(name,license,rights_confirmed) VALUES(?,?,1)",
+            ("内置原创示例题", "Project-Original"),
+        )
+        self.conn.commit()
+        sources = notebook.list_sources(self.conn, "内置原创")
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0]["questions"], self.seed_count)
+        self.assertEqual(sources[0]["verified"], self.seed_count)
 
     def test_review_wrong_starts_new_cycle(self):
         error_id = self.create_error()
@@ -436,6 +445,86 @@ class NotebookTests(unittest.TestCase):
             "SELECT verified FROM questions WHERE id=?", (question_id,)
         ).fetchone()[0]
         self.assertEqual(verified, 0)
+
+    def test_verification_review_batch_uses_item_level_verifier(self):
+        notebook.import_records(
+            self.conn,
+            [
+                {
+                    "id": "batch-pass",
+                    "stem": "求 $f(x)=x^2$ 的导数。",
+                    "answer": "$2x$",
+                    "solution": "由幂函数求导公式得到 $2x$。",
+                    "knowledge_codes": ["derivatives"],
+                    "target_causes": ["knowledge_gap"],
+                    "grade": 11,
+                    "question_type": "解答题",
+                    "difficulty": 1.5,
+                },
+                {
+                    "id": "batch-revise",
+                    "stem": "占位审核题。",
+                    "answer": "需补全",
+                    "solution": "需补全。",
+                    "knowledge_codes": ["derivatives"],
+                },
+            ],
+            "批量审核测试", None, "User-Provided-Authorized", False,
+        )
+        rows = self.conn.execute(
+            "SELECT id,stem FROM questions WHERE source_name='批量审核测试' ORDER BY stem"
+        ).fetchall()
+        ids = {row["stem"]: row["id"] for row in rows}
+        pass_id = ids["求 $f(x)=x^2$ 的导数。"]
+        revise_id = ids["占位审核题。"]
+        pass_review = {
+            "question_id": pass_id,
+            "verdict": "pass",
+            "reviewer": "unit-test",
+            "checklist": {
+                "stem_complete": True,
+                "source_checked": True,
+                "duplicate_checked": True,
+                "answer_derived": True,
+                "solution_checked": True,
+            },
+            "independent_answer": "$2x$",
+            "independent_solution": "独立使用幂函数求导公式得 $2x$。",
+            "answer_check": "match",
+            "solution_check": "match",
+            "knowledge_codes": ["derivatives"],
+            "target_causes": ["knowledge_gap"],
+            "feature_codes": ["formula-substitution"],
+            "grade": 11,
+            "difficulty": 1.5,
+            "question_type": "解答题",
+            "correction": {},
+        }
+        revise_review = {
+            "question_id": revise_id,
+            "verdict": "needs_revision",
+            "reviewer": "unit-test",
+            "review_note": "答案和解析均为占位文本。",
+        }
+        pass_path = self.root / "pass.review.json"
+        revise_path = self.root / "revise.review.json"
+        pass_path.write_text(json.dumps(pass_review, ensure_ascii=False), encoding="utf-8")
+        revise_path.write_text(json.dumps(revise_review, ensure_ascii=False), encoding="utf-8")
+        manifest = self.root / "review-manifest.json"
+        manifest.write_text(
+            json.dumps({
+                "items": [
+                    {"question_id": pass_id, "review": str(pass_path)},
+                    {"question_id": revise_id, "review": str(revise_path)},
+                ]
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        result = notebook.apply_verification_review_batch(self.conn, manifest)
+        self.assertEqual(result["processed"], 2)
+        self.assertEqual(result["verified"], 1)
+        self.assertEqual(result["needs_revision"], 1)
+        self.assertEqual(result["failed"], 0)
 
     def test_structural_features_are_used_in_recommendation_reason(self):
         notebook.import_records(

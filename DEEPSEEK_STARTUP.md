@@ -1,9 +1,10 @@
-# DeepSeek / Codex++ 快速启动
+# 李兆霖数学错题本：DeepSeek / Codex++ 快速启动
 
 本文件只用于无法直接判断启动方式时。项目的实时状态、任务规则和下一步命令由权威脚本生成，避免每个智能体重复读取长交接材料。
 
 ## 1. 固定入口
 
+- 正式项目名称：`李兆霖数学错题本`
 - 项目根目录：`C:\Users\Administrator\Documents\Codex\2026-07-17\new-chat-5\math-error-notebook`
 - 唯一主库：`data/math_notebook.db`
 - 唯一业务入口：`.agents/skills/math-error-notebook/scripts/notebook.py`

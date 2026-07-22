@@ -25,6 +25,7 @@ SKILL_DIR = SCRIPT_DIR.parent
 PROJECT_ROOT = SKILL_DIR.parents[2]
 DEFAULT_DB = PROJECT_ROOT / "data" / "math_notebook.db"
 DEFAULT_CONFIG = PROJECT_ROOT / "config" / "math-error-notebook.json"
+DEFAULT_PROJECT_NAME = "李兆霖数学错题本"
 LOCAL_PDF_RUNTIME = PROJECT_ROOT / "runtime" / "pdf"
 PDF_REQUIREMENTS = PROJECT_ROOT / "requirements-pdf.txt"
 MPL_CONFIG_DIR = PROJECT_ROOT / "tmp" / "pdfs" / "matplotlib"
@@ -460,6 +461,7 @@ def create_pdf(
     solution_chars: int,
     include_answers: bool = False,
     knowledge_names: list[str] | None = None,
+    project_name: str = DEFAULT_PROJECT_NAME,
 ) -> None:
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER
@@ -505,7 +507,7 @@ def create_pdf(
         canvas.saveState()
         canvas.setFont(font, 8)
         canvas.setFillColor(colors.HexColor("#667085"))
-        canvas.drawString(18 * mm, 12 * mm, f"高中数学错题本 · {error_id}")
+        canvas.drawString(18 * mm, 12 * mm, f"{project_name} · {error_id}")
         canvas.drawRightString(192 * mm, 12 * mm, f"第 {doc.page} 页")
         canvas.restoreState()
 
@@ -544,8 +546,8 @@ def create_pdf(
     output.parent.mkdir(parents=True, exist_ok=True)
     doc = SimpleDocTemplate(
         str(output), pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm,
-        topMargin=17 * mm, bottomMargin=19 * mm, title=f"针对性练习 {error_id}",
-        author="高中数学错题本",
+        topMargin=17 * mm, bottomMargin=19 * mm,
+        title=f"{project_name} · 针对性练习 {error_id}", author=project_name,
     )
     knowledge_names = knowledge_names or []
     info_bits: list[str] = []
@@ -554,7 +556,7 @@ def create_pdf(
     cause_label = _cause_name(error["cause_code"])
     if cause_label:
         info_bits.append(f"错因：{html.escape(cause_label)}")
-    story = [Paragraph("错因针对性练习", title)]
+    story = [Paragraph(f"{html.escape(project_name)}<br/><font size='11'>错因针对性练习</font>", title)]
     story.extend(text_flowables(error["problem_text"], body, prefix="<b>错题原题：</b>"))
     story.extend([
         Paragraph("　　".join(info_bits) if info_bits else "知识点：—", body),
@@ -629,10 +631,12 @@ def main() -> int:
     error, items, knowledge_names = load_items(args.db, args.error_id)
     # 默认不附答案页（孩子做完后拍照判题）；--with-answers 或配置项可显式打开。
     include_answers = bool(args.with_answers or config.get("answers_after_questions", False))
+    project_name = str(config.get("project_name") or DEFAULT_PROJECT_NAME).strip()
     create_pdf(
         output, args.error_id, error, items, max(300, args.solution_chars),
         include_answers=include_answers,
         knowledge_names=knowledge_names,
+        project_name=project_name,
     )
     printer = args.printer or config.get("printer_name")
     if args.do_print:
@@ -643,6 +647,7 @@ def main() -> int:
                 questions_only, args.error_id, error, items, max(300, args.solution_chars),
                 include_answers=False,
                 knowledge_names=knowledge_names,
+                project_name=project_name,
             )
             try:
                 print_pdf(questions_only, printer)

@@ -44,7 +44,7 @@ def footer(canvas, doc):
     canvas.saveState()
     canvas.setFont(FONT, 8)
     canvas.setFillColor(colors.HexColor("#667085"))
-    canvas.drawString(18 * mm, 12 * mm, "高中数学错题本 · 第6题错因专项训练")
+    canvas.drawString(18 * mm, 12 * mm, "李兆霖数学错题本 · 第6题错因专项训练")
     canvas.drawRightString(192 * mm, 12 * mm, f"第 {doc.page} 页")
     canvas.restoreState()
 
@@ -127,7 +127,7 @@ def build_pdf() -> Path:
         topMargin=17 * mm,
         bottomMargin=19 * mm,
         title="第6题错因专项训练：垂直平分线与圆心轨迹",
-        author="高中数学错题本",
+        author="李兆霖数学错题本",
     )
     story = [
         Paragraph("第6题错因专项训练", title_style),

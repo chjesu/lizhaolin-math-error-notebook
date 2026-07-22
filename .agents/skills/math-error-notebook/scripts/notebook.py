@@ -64,6 +64,7 @@ FEATURE_CODES = {
 }
 REVIEW_INTERVALS = (1, 2, 4, 7, 15, 30)
 SCHEMA_VERSION = 2
+PROJECT_NAME = "李兆霖数学错题本"
 SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR.parent
 
@@ -238,6 +239,10 @@ def init_database(conn: sqlite3.Connection, knowledge_file: Path = DEFAULT_KNOWL
     conn.execute(
         "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
         (str(SCHEMA_VERSION),),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO metadata(key, value) VALUES('project_name', ?)",
+        (PROJECT_NAME,),
     )
     points = json.loads(knowledge_file.read_text(encoding="utf-8"))
     for point in points:
@@ -729,7 +734,7 @@ def render_error_markdown(error_id: str, analysis: dict[str, Any], schedule: lis
     codes = analysis.get("knowledge_codes") or []
     evidence = analysis.get("evidence") or []
     lines = [
-        f"# 错题记录 {error_id}",
+        f"# {PROJECT_NAME} · 错题记录 {error_id}",
         "",
         f"- 记录时间：{analysis.get('occurred_at') or date.today().isoformat()}",
         f"- 知识点：{', '.join(codes) if codes else '待标注'}",
@@ -1092,7 +1097,7 @@ def recommend(
         out_dir = project_root / "practice"
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"{error_id}-{date.today().isoformat()}.md"
-        lines = [f"# 针对性练习：{error_id}", ""]
+        lines = [f"# {PROJECT_NAME} · 针对性练习：{error_id}", ""]
         for item in selected:
             lines.extend([
                 f"## {item['rank']}. {item['question_id']}（难度 {item['difficulty']}/5）",
@@ -1160,7 +1165,7 @@ def assign_recommendations(
         out_dir = project_root / "practice"
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"{error_id}-{date.today().isoformat()}.md"
-        lines = [f"# 针对性练习：{error_id}", ""]
+        lines = [f"# {PROJECT_NAME} · 针对性练习：{error_id}", ""]
         for item in selected:
             lines.extend([
                 f"## {item['rank']}. {item['question_id']}（难度 {item['difficulty']}/5）",
@@ -1280,6 +1285,9 @@ def bank_info(conn: sqlite3.Connection, db_path: Path) -> dict[str, Any]:
     logical_dump = "\n".join(conn.iterdump())
     logical_hash = hashlib.sha256(logical_dump.encode("utf-8")).hexdigest()
     return {
+        "project_name": conn.execute(
+            "SELECT value FROM metadata WHERE key='project_name'"
+        ).fetchone()[0],
         "canonical_path": str(resolved),
         "sha256": logical_hash,
         "integrity_check": conn.execute("PRAGMA integrity_check").fetchone()[0],
@@ -2011,6 +2019,7 @@ def doctor(
         "checks": checks,
         "warnings": warnings,
         "bank": {
+            "project_name": info["project_name"],
             "canonical_path": info["canonical_path"],
             "sha256": info["sha256"],
             "schema_version": info["schema_version"],
@@ -2272,7 +2281,7 @@ def print_output(payload: Any, as_json: bool, pretty_json: bool = False) -> None
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="高中数学错题本数据库工具")
+    parser = argparse.ArgumentParser(description=f"{PROJECT_NAME}数据库工具")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="SQLite database path")
     parser.add_argument("--pretty-json", action="store_true", help="indent JSON output for humans")
     sub = parser.add_subparsers(dest="command", required=True)

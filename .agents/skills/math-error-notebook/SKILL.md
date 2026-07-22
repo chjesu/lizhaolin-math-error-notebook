@@ -3,7 +3,7 @@ name: math-error-notebook
 description: Manage a Chinese high-school math error notebook backed by one local verified question bank. Use for grading photographed or typed Grade 10-12 math work, diagnosing the first wrong step, saving structured errors, recommending verified practice, generating/printing practice PDFs, importing authorized questions, recording attempts, reviews, and weakness statistics.
 ---
 
-# Math Error Notebook
+# 李兆霖数学错题本
 
 ## Fast path
 

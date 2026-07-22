@@ -1,4 +1,4 @@
-# 高中数学错题本项目规则
+# 李兆霖数学错题本项目规则
 
 - 通过 Codex++、DeepSeek 或其他外部模型运行时，先运行 `notebook.py doctor --json` 和与任务匹配的 `notebook.py agent-context --task <task> --json`；仅在预检失败或输出要求时读取 `DEEPSEEK_STARTUP.md`/专项参考。
 - 修改或新建功能前先查 `PROJECT_ARCHITECTURE.md`，优先扩展现有权威入口，禁止创建平行数据库层、推荐器、验证器或通用打印器。

@@ -191,6 +191,7 @@ class NotebookTests(unittest.TestCase):
 
     def test_bank_info_reports_identity_and_integrity(self):
         info = notebook.bank_info(self.conn, self.db)
+        self.assertEqual(info["project_name"], "李兆霖数学错题本")
         self.assertEqual(info["canonical_path"], str(self.db.resolve()))
         self.assertEqual(info["integrity_check"], "ok")
         self.assertEqual(info["foreign_key_violations"], 0)
@@ -655,6 +656,7 @@ class NotebookTests(unittest.TestCase):
         text = "\n".join(
             page.extract_text() for page in PdfReader(str(default_pdf)).pages
         )
+        self.assertIn("李兆霖数学错题本", text)
         self.assertIn("错因针对性练习", text)
         self.assertIn("错题原题", text)
         self.assertIn("知识点", text)

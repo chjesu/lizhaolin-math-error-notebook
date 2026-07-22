@@ -7,6 +7,7 @@ import argparse
 import csv
 import difflib
 import hashlib
+import importlib.util
 import json
 import re
 import shutil
@@ -77,6 +78,8 @@ def default_database_path() -> Path:
 DEFAULT_DB = default_database_path()
 DEFAULT_KNOWLEDGE = SKILL_DIR / "assets/knowledge-points.json"
 DEFAULT_SEED = SKILL_DIR / "assets/seed-questions.jsonl"
+DEFAULT_PROJECT_ROOT = DEFAULT_DB.parent.parent
+RELIABLE_BATCH = "2026-07-19-g11-beijing-20"
 
 
 def now_iso() -> str:
@@ -773,17 +776,58 @@ def render_error_markdown(error_id: str, analysis: dict[str, Any], schedule: lis
     return "\n".join(lines) + "\n"
 
 
-def record_error(conn: sqlite3.Connection, analysis: dict[str, Any], project_root: Path, copy_image: bool) -> str:
+def validate_error_analysis(
+    conn: sqlite3.Connection, analysis: dict[str, Any]
+) -> dict[str, Any]:
+    """Run deterministic validation before an error analysis is persisted."""
+    if not isinstance(analysis, dict):
+        raise ValueError("analysis must be a JSON object")
     required = ("problem_text", "cause_code", "cause_detail", "difficulty", "confidence")
     missing = [key for key in required if analysis.get(key) in (None, "")]
     if missing:
         raise ValueError(f"analysis missing required fields: {', '.join(missing)}")
-    if analysis["cause_code"] not in CAUSE_CODES:
-        raise ValueError(f"unsupported cause_code: {analysis['cause_code']}")
+    cause_code = str(analysis["cause_code"])
+    if cause_code not in CAUSE_CODES:
+        raise ValueError(f"unsupported cause_code: {cause_code}")
     difficulty = float(analysis["difficulty"])
     confidence = float(analysis["confidence"])
     if not 1 <= difficulty <= 5 or not 0 <= confidence <= 1:
         raise ValueError("difficulty must be 1..5 and confidence must be 0..1")
+    evidence = analysis.get("evidence") or []
+    if not isinstance(evidence, list):
+        raise ValueError("evidence must be a list")
+    if cause_code == "careless" and not any(str(item).strip() for item in evidence):
+        raise ValueError("careless requires direct evidence from the student's work")
+    codes = analysis.get("knowledge_codes") or []
+    if not isinstance(codes, list):
+        raise ValueError("knowledge_codes must be a list")
+    valid_codes = {row[0] for row in conn.execute("SELECT code FROM knowledge_points")}
+    unknown = [str(code) for code in codes if code not in valid_codes]
+    if unknown:
+        raise ValueError("unknown knowledge code: " + ", ".join(unknown))
+    features = validate_feature_codes(analysis.get("feature_codes") or [])
+    warnings: list[str] = []
+    if cause_code != "unclear" and not str(analysis.get("first_wrong_step") or "").strip():
+        warnings.append("first_wrong_step_missing")
+    if not str(analysis.get("correct_solution") or "").strip():
+        warnings.append("correct_solution_missing")
+    if cause_code == "unclear" and confidence > 0.7:
+        warnings.append("unclear_with_high_confidence")
+    return {
+        "valid": True,
+        "cause_code": cause_code,
+        "difficulty": difficulty,
+        "confidence": confidence,
+        "knowledge_codes": codes,
+        "feature_codes": features,
+        "warnings": warnings,
+    }
+
+
+def record_error(conn: sqlite3.Connection, analysis: dict[str, Any], project_root: Path, copy_image: bool) -> str:
+    validation = validate_error_analysis(conn, analysis)
+    difficulty = validation["difficulty"]
+    confidence = validation["confidence"]
     occurred = analysis.get("occurred_at") or now_iso()
     error_id = analysis.get("id") or f"ERR-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8]}"
     image_path = analysis.get("image_path")
@@ -807,10 +851,7 @@ def record_error(conn: sqlite3.Connection, analysis: dict[str, Any], project_roo
             image_path, analysis.get("question_id"), now_iso(), json.dumps(analysis, ensure_ascii=False),
         ),
     )
-    valid_codes = {row[0] for row in conn.execute("SELECT code FROM knowledge_points")}
-    for code in analysis.get("knowledge_codes") or []:
-        if code not in valid_codes:
-            raise ValueError(f"unknown knowledge code: {code}")
+    for code in validation["knowledge_codes"]:
         conn.execute("INSERT INTO error_knowledge(error_id, knowledge_code) VALUES(?, ?)", (error_id, code))
     base = datetime.fromisoformat(occurred).date() if "T" in occurred else date.fromisoformat(occurred)
     create_review_cycle(conn, error_id, base, 1)
@@ -1820,6 +1861,333 @@ def audit_summary(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def _read_project_config(project_root: Path) -> dict[str, Any]:
+    path = project_root / "config" / "math-error-notebook.json"
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _find_soffice() -> Path | None:
+    candidates = (
+        Path(r"C:\Program Files\LibreOffice\program\soffice.exe"),
+        Path(r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"),
+    )
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def _git_summary(project_root: Path) -> dict[str, Any]:
+    command = [
+        "git", "-c", f"safe.directory={project_root.resolve()}",
+        "-C", str(project_root.resolve()),
+    ]
+    try:
+        head = subprocess.run(
+            [*command, "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, encoding="utf-8", timeout=5,
+        )
+        status = subprocess.run(
+            [*command, "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True, text=True, encoding="utf-8", timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {"available": False, "head": None, "tracked_dirty": None}
+    return {
+        "available": head.returncode == 0,
+        "head": head.stdout.strip() or None,
+        "tracked_dirty": bool(status.stdout.strip()) if status.returncode == 0 else None,
+    }
+
+
+def doctor(
+    conn: sqlite3.Connection, db_path: Path, project_root: Path
+) -> dict[str, Any]:
+    """Run one deterministic, read-only project startup check."""
+    info = bank_info(conn, db_path)
+    required = (
+        project_root / "AGENTS.md",
+        project_root / "PROJECT_ARCHITECTURE.md",
+        project_root / ".agents" / "skills" / "math-error-notebook" / "SKILL.md",
+        project_root / ".agents" / "skills" / "math-error-notebook" / "assets" / "error-analysis-template.json",
+        project_root / ".agents" / "skills" / "math-error-notebook" / "assets" / "question-review-template.json",
+    )
+    runtime = project_root / "runtime" / "pdf"
+    added_runtime = False
+    if runtime.is_dir() and str(runtime) not in sys.path:
+        sys.path.insert(0, str(runtime))
+        added_runtime = True
+    try:
+        pdf_dependencies = {
+            module: importlib.util.find_spec(module) is not None
+            for module in ("reportlab", "PIL", "matplotlib", "pypdf")
+        }
+    finally:
+        if added_runtime:
+            sys.path.remove(str(runtime))
+    config = _read_project_config(project_root)
+    checks = {
+        "canonical_database": Path(info["canonical_path"]) == DEFAULT_DB.resolve(),
+        "integrity": info["integrity_check"] == "ok",
+        "foreign_keys": info["foreign_key_violations"] == 0,
+        "schema": str(info["schema_version"]) == str(SCHEMA_VERSION),
+        "required_project_files": all(path.is_file() for path in required),
+    }
+    warnings: list[str] = []
+    missing_pdf = [name for name, available in pdf_dependencies.items() if not available]
+    if missing_pdf:
+        warnings.append("missing_pdf_dependencies:" + ",".join(missing_pdf))
+    if not _find_soffice():
+        warnings.append("libreoffice_not_found")
+    if not config.get("printer_name"):
+        warnings.append("printer_not_configured")
+    return {
+        "status": "ok" if all(checks.values()) else "error",
+        "checks": checks,
+        "warnings": warnings,
+        "bank": {
+            "canonical_path": info["canonical_path"],
+            "sha256": info["sha256"],
+            "schema_version": info["schema_version"],
+            "questions": info["questions"],
+            "verified": info["verified_questions"],
+            "unverified": info["questions"] - info["verified_questions"],
+            "errors": info["errors"],
+        },
+        "pdf_dependencies": pdf_dependencies,
+        "printer": config.get("printer_name"),
+        "libreoffice": str(_find_soffice()) if _find_soffice() else None,
+    }
+
+
+def handoff_snapshot(
+    conn: sqlite3.Connection, db_path: Path, project_root: Path
+) -> dict[str, Any]:
+    """Return a compact operational snapshot suitable for another agent."""
+    health = doctor(conn, db_path, project_root)
+    audit = audit_summary(conn)
+    nonzero_issues = {key: value for key, value in audit["issues"].items() if value}
+    top_sources = [
+        {
+            "source_name": row["source_name"],
+            "questions": row["questions"],
+            "issues": {
+                key: value
+                for key, value in row.items()
+                if key not in {"source_name", "questions"} and value
+            },
+        }
+        for row in audit["sources"][:5]
+    ]
+    return {
+        "generated_at": now_iso(),
+        "status": health["status"],
+        "bank": health["bank"],
+        "unverified_issues": nonzero_issues,
+        "top_pending_sources": top_sources,
+        "due_reviews": len(review_due(conn, date.today())),
+        "git": _git_summary(project_root),
+        "warnings": health["warnings"],
+        "defaults": {"answers": False, "print": False},
+        "reliable_batch_exception": RELIABLE_BATCH,
+    }
+
+
+AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
+    "grade": {
+        "commands": [
+            "causes --text <topic> --json",
+            "knowledge --text <topic> --json",
+            "features --text <structure> --json",
+            "grade-preview <analysis.json> --json",
+            "grade-commit <analysis.json> --copy-image --json",
+            "recommend-packet <error-id> --out <packet.json> --json",
+        ],
+        "optional_reference": "references/error-taxonomy.md only when cause selection is ambiguous",
+    },
+    "recommend": {
+        "commands": [
+            "recommend-packet <error-id> --keyword <type> --feature <code> --out <packet.json> --json",
+            "assign-recommendations <error-id> <reviewed-plan.json> --save --json",
+            "practice_sheet.py <error-id>",
+        ],
+    },
+    "verify": {
+        "commands": [
+            "prepare-audit-batch --source-name <source> --limit <n> --out-dir <dir> --json",
+            "verify-item <question-id> <review.json> --json",
+        ],
+        "required_reference": "references/import-and-verification.md",
+    },
+    "import": {
+        "commands": [
+            "scripts/extract_docx_omml.py <docx> --output-dir <dir>",
+            "scripts/build_omml_exam_import.py <extracted.json> --output <jsonl>",
+            "import-file <jsonl> --source-name <name> --license <license> --rights-confirmed --json",
+            "prepare-audit-batch --source-name <source> --limit <n> --out-dir <dir> --json",
+        ],
+        "required_reference": "references/import-and-verification.md",
+    },
+    "review": {
+        "commands": [
+            "due --json", "attempt <question-id> --error-id <error-id> --correct|--wrong --json",
+            "review <error-id> --result correct|partial|wrong --json", "stats --json",
+        ],
+    },
+    "pdf": {
+        "commands": [
+            "practice_sheet.py <error-id>",
+            "practice_sheet.py <error-id> --with-answers",
+            "practice_sheet.py <error-id> --print  # only after explicit user request",
+        ],
+    },
+    "maintenance": {
+        "commands": ["doctor --json", "handoff --json", "audit-summary --json", "coverage --json"],
+    },
+}
+
+
+def agent_context(
+    conn: sqlite3.Connection, db_path: Path, project_root: Path, task: str
+) -> dict[str, Any]:
+    health = doctor(conn, db_path, project_root)
+    task_context = AGENT_TASK_CONTEXT[task]
+    return {
+        "task": task,
+        "health": {
+            "status": health["status"],
+            "canonical_path": health["bank"]["canonical_path"],
+            "integrity": health["checks"]["integrity"],
+            "foreign_keys": health["checks"]["foreign_keys"],
+            "questions": health["bank"]["questions"],
+            "verified": health["bank"]["verified"],
+            "unverified": health["bank"]["unverified"],
+        },
+        "critical_rules": [
+            "use only data/math_notebook.db through notebook.py",
+            "never verify from source reputation, external verified, sampling, or bulk SQL",
+            "recommend only verified questions and review relevance before save",
+            "PDF defaults to no answers and no print",
+            "mathematical judgment remains model-reviewed; deterministic scripts do not replace it",
+        ],
+        "reliable_batch_exception": RELIABLE_BATCH if task == "verify" else None,
+        **task_context,
+    }
+
+
+def prepare_audit_batch(
+    conn: sqlite3.Connection,
+    source_name: str | None,
+    limit: int,
+    out_dir: Path,
+    reviewer: str,
+    force: bool,
+) -> dict[str, Any]:
+    """Create packets and safe, unsubmitted review skeletons without changing the DB."""
+    rows = audit_queue(conn, limit, source_name, full=False)
+    packets_dir = out_dir / "packets"
+    reviews_dir = out_dir / "reviews"
+    items: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    for row in rows:
+        question_id = row["id"]
+        safe_id = re.sub(r"[^0-9A-Za-z._-]+", "_", question_id)
+        packet_path = packets_dir / f"{safe_id}.json"
+        review_path = reviews_dir / f"{safe_id}.review.json"
+        if review_path.exists() and not force:
+            skipped.append(question_id)
+            continue
+        summary = audit_item(conn, question_id, packet_path)
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        question = packet["question"]
+        review = {
+            "question_id": question_id,
+            "verdict": "pending",
+            "reviewer": reviewer,
+            "checklist": {
+                "stem_complete": False,
+                "source_checked": False,
+                "duplicate_checked": False,
+                "answer_derived": False,
+                "solution_checked": False,
+            },
+            "independent_answer": "",
+            "independent_solution": "",
+            "answer_check": "pending",
+            "solution_check": "pending",
+            "knowledge_codes": question["knowledge_codes"],
+            "target_causes": question["target_causes"],
+            "feature_codes": question["feature_codes"],
+            "grade": question["grade"],
+            "difficulty": question["difficulty"],
+            "question_type": question["question_type"],
+            "correction": {},
+            "review_note": "",
+            "packet_sha256": packet["packet_sha256"],
+        }
+        reviews_dir.mkdir(parents=True, exist_ok=True)
+        review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
+        items.append({
+            "question_id": question_id,
+            "packet": str(packet_path.resolve()),
+            "review": str(review_path.resolve()),
+            "issues": summary["issues"],
+            "near_duplicates": summary["near_duplicate_count"],
+        })
+    manifest = {
+        "schema": "math-audit-work-batch/v1",
+        "created_at": now_iso(),
+        "source_name": source_name,
+        "items": items,
+        "skipped_existing_reviews": skipped,
+        "next_command": "verify-item <question-id> <review.json> --json",
+    }
+    out_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = out_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "prepared": len(items),
+        "skipped": len(skipped),
+        "manifest": str(manifest_path.resolve()),
+        "question_ids": [item["question_id"] for item in items],
+        "database_modified": False,
+    }
+
+
+def recommendation_packet(
+    conn: sqlite3.Connection,
+    error_id: str,
+    limit: int,
+    project_root: Path,
+    keywords: list[str] | None,
+    features: list[str] | None,
+    out_path: Path,
+) -> dict[str, Any]:
+    items = recommend(
+        conn, error_id, limit, False, project_root, keywords, False, True, features
+    )
+    packet = {
+        "schema": "math-recommendation-review-packet/v1",
+        "error_id": error_id,
+        "generated_at": now_iso(),
+        "review_required": True,
+        "save_command": f"assign-recommendations {error_id} <reviewed-plan.json> --save --json",
+        "items": items,
+    }
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "error_id": error_id,
+        "candidates": len(items),
+        "packet": str(out_path.resolve()),
+        "question_ids": [item["question_id"] for item in items],
+        "database_modified": False,
+    }
+
+
 def print_output(payload: Any, as_json: bool, pretty_json: bool = False) -> None:
     if as_json:
         if pretty_json:
@@ -1896,6 +2264,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--copy-image", action="store_true")
     p.add_argument("--json", action="store_true")
 
+    p = sub.add_parser("grade-preview", help="validate an error analysis without writing")
+    p.add_argument("analysis", type=Path, help="analysis JSON file")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("grade-commit", help="validate and store an error analysis")
+    p.add_argument("analysis", type=Path, help="analysis JSON file")
+    p.add_argument("--project-root", type=Path, default=Path.cwd())
+    p.add_argument("--copy-image", action="store_true")
+    p.add_argument("--json", action="store_true")
+
     p = sub.add_parser("delete-error", help="remove a mistakenly recorded error")
     p.add_argument("error_id")
     p.add_argument("--project-root", type=Path, default=Path.cwd())
@@ -1909,6 +2287,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--keyword", action="append", help="boost questions containing this type keyword")
     p.add_argument("--feature", action="append", choices=tuple(FEATURE_CODES), help="match an audited structural feature")
     p.add_argument("--full", action="store_true", help="include answers, solutions, and source URL")
+    p.add_argument("--project-root", type=Path, default=Path.cwd())
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("recommend-packet", help="write full recommendation candidates for model review")
+    p.add_argument("error_id")
+    p.add_argument("--limit", type=int, default=5)
+    p.add_argument("--keyword", action="append")
+    p.add_argument("--feature", action="append", choices=tuple(FEATURE_CODES))
+    p.add_argument("--out", type=Path, required=True)
     p.add_argument("--project-root", type=Path, default=Path.cwd())
     p.add_argument("--json", action="store_true")
 
@@ -1999,6 +2386,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", type=Path, help="write full packet and return only a compact summary")
     p.add_argument("--json", action="store_true")
 
+    p = sub.add_parser("prepare-audit-batch", help="create audit packets and pending review skeletons")
+    p.add_argument("--source-name")
+    p.add_argument("--limit", type=int, default=10)
+    p.add_argument("--out-dir", type=Path, required=True)
+    p.add_argument("--reviewer", default="codex")
+    p.add_argument("--force", action="store_true", help="overwrite existing pending review files")
+    p.add_argument("--json", action="store_true")
+
     p = sub.add_parser("verify-item", help="apply one structured independent review and optionally verify")
     p.add_argument("question_id")
     p.add_argument("review", type=Path)
@@ -2011,6 +2406,19 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("repair-embedded-options", help="backfill structured A-D options from stems")
     p.add_argument("--verified-only", action="store_true")
     p.add_argument("--source-name")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("agent-context", help="return compact task-specific rules and commands")
+    p.add_argument("--task", choices=tuple(AGENT_TASK_CONTEXT), required=True)
+    p.add_argument("--project-root", type=Path, default=DEFAULT_PROJECT_ROOT)
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("doctor", help="run one read-only project startup check")
+    p.add_argument("--project-root", type=Path, default=DEFAULT_PROJECT_ROOT)
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("handoff", help="return a compact operational handoff snapshot")
+    p.add_argument("--project-root", type=Path, default=DEFAULT_PROJECT_ROOT)
     p.add_argument("--json", action="store_true")
 
     for name, help_text in (
@@ -2075,12 +2483,27 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "record-error":
                 analysis = json.loads(args.analysis.read_text(encoding="utf-8"))
                 payload = {"error_id": record_error(conn, analysis, args.project_root, args.copy_image)}
+            elif args.command == "grade-preview":
+                analysis = json.loads(args.analysis.read_text(encoding="utf-8"))
+                payload = validate_error_analysis(conn, analysis)
+                payload["database_modified"] = False
+            elif args.command == "grade-commit":
+                analysis = json.loads(args.analysis.read_text(encoding="utf-8"))
+                payload = {
+                    "error_id": record_error(conn, analysis, args.project_root, args.copy_image),
+                    "database_modified": True,
+                }
             elif args.command == "delete-error":
                 payload = delete_error(conn, args.error_id, args.project_root)
             elif args.command == "recommend":
                 payload = recommend(
                     conn, args.error_id, max(1, min(args.limit, 10)), args.save,
                     args.project_root, args.keyword, args.replace, args.full, args.feature,
+                )
+            elif args.command == "recommend-packet":
+                payload = recommendation_packet(
+                    conn, args.error_id, max(1, min(args.limit, 10)), args.project_root,
+                    args.keyword, args.feature, args.out,
                 )
             elif args.command == "assign-recommendations":
                 plan = json.loads(args.plan.read_text(encoding="utf-8"))
@@ -2113,6 +2536,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
             elif args.command == "audit-item":
                 payload = audit_item(conn, args.question_id, args.out)
+            elif args.command == "prepare-audit-batch":
+                payload = prepare_audit_batch(
+                    conn, args.source_name, max(1, min(args.limit, 100)), args.out_dir,
+                    args.reviewer, args.force,
+                )
             elif args.command == "verify-item":
                 payload = apply_verification_review(conn, args.question_id, args.review)
             elif args.command == "backfill-features":
@@ -2121,6 +2549,12 @@ def main(argv: list[str] | None = None) -> int:
                 payload = repair_embedded_options(
                     conn, args.verified_only, args.source_name
                 )
+            elif args.command == "agent-context":
+                payload = agent_context(conn, args.db, args.project_root, args.task)
+            elif args.command == "doctor":
+                payload = doctor(conn, args.db, args.project_root)
+            elif args.command == "handoff":
+                payload = handoff_snapshot(conn, args.db, args.project_root)
             elif args.command == "bank-info":
                 payload = bank_info(conn, args.db)
             elif args.command == "audit-summary":

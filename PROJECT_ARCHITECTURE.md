@@ -6,7 +6,7 @@
 
 - 唯一活动题库：`data/math_notebook.db`
 - 数据库 schema：`2`
-- 题目：`1383`；已验证：`864`；未验证：`519`
+- 题目：`1383`；已验证：`1075`；未验证：`308`
 - 来源：`104`；错题记录：`8`
 - 主执行器：`.agents/skills/math-error-notebook/scripts/notebook.py`
 - 组卷与打印：`.agents/skills/math-error-notebook/scripts/practice_sheet.py`
@@ -119,6 +119,9 @@ flowchart LR
 
 | 功能域 | 命令 | 已有能力 |
 |---|---|---|
+| 智能体启动 | `doctor` | 一次检查唯一主库、schema、完整性、项目文件、PDF 依赖、LibreOffice 和打印配置 |
+| 智能体启动 | `agent-context` | 按 grade/recommend/verify/import/review/pdf/maintenance 返回最小规则与命令集合 |
+| 智能体交接 | `handoff` | 精简输出主库哈希、验证数量、主要问题、复习任务和 Git 状态 |
 | 初始化 | `init` | 创建 schema、装载知识点；主库存在时不得用来重建数据 |
 | 初始化 | `seed` | 幂等导入项目原创种子题，仅用于首次建库 |
 | 题库身份 | `bank-info` | 主库绝对路径、SHA256、schema、完整性、外键和数量 |
@@ -128,8 +131,10 @@ flowchart LR
 | 来源同步 | `sync-source-manifest` | 将来源清单同步到题库来源记录 |
 | 来源修复 | `update-source` | 修正一个来源的 URL、许可、授权确认和备注 |
 | 错题保存 | `record-error` | 保存结构化错因、图片、知识点和复习周期 |
+| 错题预检/保存 | `grade-preview` / `grade-commit` | 写库前验证错因 JSON；粗心必须有直接证据；提交复用同一质量门 |
 | 错题撤销 | `delete-error` | 删除误保存的错题及受控派生文件 |
 | 推荐预览/保存 | `recommend` | 按知识点、错因、难度、作答史、关键词和结构特征排序已验证题 |
+| 推荐审核包 | `recommend-packet` | 将完整候选写入本地审核包，只返回精简 ID，不保存推荐 |
 | 人工推荐 | `assign-recommendations` | 用模型逐题复核后的已验证题替换自动候选 |
 | 复习到期 | `due` | 查询到期或逾期复习任务 |
 | 复习反馈 | `review` | 记录 correct/partial/wrong，并在失败时启动新周期 |
@@ -142,6 +147,7 @@ flowchart LR
 | 单题标注 | `annotate` | 修正题干/答案/解析/标签/难度/题型；内部验证质量门 |
 | 审核队列 | `audit-queue` | 精简列出未验证题，可按来源过滤 |
 | 审核包 | `audit-item` | 汇总一题的内容、来源、问题、近重复项和审核要求 |
+| 审核脚手架 | `prepare-audit-batch` | 生成逐题审核包和 verdict=pending 的审核 JSON，不修改数据库 |
 | 结构化验证 | `verify-item` | 接受独立审核 JSON；逐题记录并在通过时提升状态 |
 | 特征回填 | `backfill-features` | 幂等推断题型结构特征，不改变验证状态 |
 | 选项修复 | `repair-embedded-options` | 从原始记录或题干回填 A-D 结构化选项 |
@@ -156,10 +162,11 @@ flowchart LR
 - 数据库与标识：`default_database_path`、`connect`、`init_database`、`fingerprint`、`slug_id`、`bank_info`
 - 题目标准化：`infer_knowledge`、`infer_question_features`、`validate_feature_codes`、`normalize_difficulty`、`normalize_question`、`insert_question`
 - 导入与来源：`import_records`、`read_json_records`、`fetch_json`、`register_exam_directory`、`sync_source_manifest`、`update_source_metadata`
-- 错题与复习：`create_review_cycle`、`render_error_markdown`、`record_error`、`fetch_error`、`delete_error`、`review_due`、`mark_review`、`record_attempt`
-- 推荐：`compact_recommendations`、`question_feature_codes`、`backfill_question_features`、`error_feature_codes`、`recommend`、`assign_recommendations`
+- 错题与复习：`create_review_cycle`、`render_error_markdown`、`validate_error_analysis`、`record_error`、`fetch_error`、`delete_error`、`review_due`、`mark_review`、`record_attempt`
+- 推荐：`compact_recommendations`、`question_feature_codes`、`backfill_question_features`、`error_feature_codes`、`recommend`、`recommendation_packet`、`assign_recommendations`
 - 检索与统计：`stats`、`coverage`、`list_knowledge_points`、`list_cause_codes`、`list_feature_codes`、`question_detail`、`search_questions`
-- 审核与修复：`annotate_question`、`question_issue_codes`、`near_duplicate_candidates`、`audit_item`、`apply_verification_review`、`repair_embedded_options`、`audit_queue`、`audit_summary`
+- 审核与修复：`annotate_question`、`question_issue_codes`、`near_duplicate_candidates`、`audit_item`、`prepare_audit_batch`、`apply_verification_review`、`repair_embedded_options`、`audit_queue`、`audit_summary`
+- 启动与交接：`doctor`、`agent_context`、`handoff_snapshot`、`_git_summary`
 - CLI：`print_output`、`build_parser`、`main`
 
 ## 6. `practice_sheet.py` 完整职责
@@ -311,14 +318,23 @@ math-error-notebook/
 
 只有以下情况适合增加代码：现有入口确实无法表达需求；功能可重复使用；不会绕过质量门；明确归属到现有模块；同时增加回归测试和本文索引。
 
-## 12. 已知但尚未实现
+## 12. 智能体低 Token 快速路径
 
-以下名称目前不是可用命令，智能体不得假定已经存在：
+常规任务不再人工拼接预检、审核包或交接摘要。先运行：
 
-- `doctor`：启动环境、打印机、schema 和配置自检
-- `handoff`：精简交接状态
-- `grade-preview` / `grade-commit`：错题处理的预览—提交事务
-- 模型行为标准案例集：验证首错、错因证据和推荐质量
+```powershell
+python -B .agents\skills\math-error-notebook\scripts\notebook.py doctor --json
+python -B .agents\skills\math-error-notebook\scripts\notebook.py agent-context --task <task> --json
+```
+
+固定流程：
+
+- 判题：`grade-preview → grade-commit`
+- 推荐：`recommend-packet → 模型复核 → assign-recommendations`
+- 验证：`prepare-audit-batch → 模型逐题填写 → verify-item`
+- 交接：`handoff`
+
+尚未程序化、也不应伪自动化的部分：照片内容理解、第一处实质性错误定位、独立数学推导、答案/解析逻辑判断、推荐题真实相关性复核。模型行为标准案例集仍待建立。
 
 如用户要求实现这些能力，应优先扩展 `notebook.py`、模板和测试，而不是创建平行系统。
 
@@ -327,14 +343,14 @@ math-error-notebook/
 修改前：
 
 ```powershell
-python -B .agents\skills\math-error-notebook\scripts\notebook.py bank-info --json
+python -B .agents\skills\math-error-notebook\scripts\notebook.py doctor --json
 ```
 
 修改代码后：
 
 ```powershell
 python -B -m unittest discover -s tests -v
-python -B .agents\skills\math-error-notebook\scripts\notebook.py bank-info --json
+python -B .agents\skills\math-error-notebook\scripts\notebook.py handoff --json
 ```
 
 题库写入后必须报告具体 ID、数量变化、完整性和外键结果。不得只凭对话声明完成。

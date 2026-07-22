@@ -65,6 +65,41 @@ class NotebookTests(unittest.TestCase):
         self.assertTrue(all(item["question_id"] for item in items))
         self.assertEqual(len(list((self.root / "practice").glob("*.md"))), 1)
 
+    def test_grade_preview_validates_without_writing(self):
+        analysis = {
+            "problem_text": r"求 $f(x)=x^2$ 的导数。",
+            "student_answer": r"$f'(x)=x$",
+            "correct_answer": r"$f'(x)=2x$",
+            "correct_solution": r"由幂函数求导公式得 $f'(x)=2x$。",
+            "first_wrong_step": "幂函数求导时漏乘指数 2",
+            "cause_code": "knowledge_gap",
+            "cause_detail": "没有正确使用幂函数求导公式。",
+            "evidence": ["学生将导数写成 x"],
+            "knowledge_codes": ["derivatives"],
+            "feature_codes": ["formula-substitution"],
+            "difficulty": 1.5,
+            "confidence": 0.95,
+        }
+        before = self.conn.execute("SELECT COUNT(*) FROM errors").fetchone()[0]
+        result = notebook.validate_error_analysis(self.conn, analysis)
+        after = self.conn.execute("SELECT COUNT(*) FROM errors").fetchone()[0]
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["feature_codes"], ["formula-substitution"])
+        self.assertEqual(before, after)
+
+    def test_grade_preview_rejects_careless_without_evidence(self):
+        analysis = {
+            "problem_text": "计算 $1+1$。",
+            "cause_code": "careless",
+            "cause_detail": "声称粗心但没有学生步骤证据。",
+            "evidence": [],
+            "knowledge_codes": [],
+            "difficulty": 1,
+            "confidence": 0.8,
+        }
+        with self.assertRaisesRegex(ValueError, "careless requires direct evidence"):
+            notebook.validate_error_analysis(self.conn, analysis)
+
     def test_recommendation_preview_is_compact_and_read_only(self):
         error_id = self.create_error()
         items = notebook.recommend(self.conn, error_id, 3, False, self.root)
@@ -75,6 +110,21 @@ class NotebookTests(unittest.TestCase):
             "SELECT COUNT(*) FROM recommendations WHERE error_id=?", (error_id,)
         ).fetchone()[0]
         self.assertEqual(count, 0)
+
+    def test_recommendation_packet_writes_full_candidates_without_saving(self):
+        error_id = self.create_error()
+        packet_path = self.root / "recommendation-packet.json"
+        result = notebook.recommendation_packet(
+            self.conn, error_id, 2, self.root, None, None, packet_path
+        )
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        self.assertEqual(result["database_modified"], False)
+        self.assertGreaterEqual(result["candidates"], 1)
+        self.assertIn("answer", packet["items"][0])
+        saved = self.conn.execute(
+            "SELECT COUNT(*) FROM recommendations WHERE error_id=?", (error_id,)
+        ).fetchone()[0]
+        self.assertEqual(saved, 0)
 
     def test_search_defaults_to_compact_rows(self):
         rows = notebook.search_questions(
@@ -304,6 +354,48 @@ class NotebookTests(unittest.TestCase):
             ).fetchone()[0],
             1,
         )
+
+    def test_prepare_audit_batch_creates_pending_skeletons_without_db_write(self):
+        notebook.import_records(
+            self.conn,
+            [{
+                "stem": "求函数 $f(x)=x^2$ 的导数。",
+                "answer": "$2x$",
+                "solution": "由幂函数求导公式得到。",
+                "knowledge_codes": ["derivatives"],
+                "target_causes": ["knowledge_gap"],
+            }],
+            "审核批次脚手架测试", None, "User-Provided-Authorized", False,
+        )
+        before = self.conn.execute(
+            "SELECT COUNT(*) FROM verification_reviews"
+        ).fetchone()[0]
+        out_dir = self.root / "audit-work"
+        result = notebook.prepare_audit_batch(
+            self.conn, "审核批次脚手架测试", 5, out_dir, "unit-test", False
+        )
+        manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+        review_path = Path(manifest["items"][0]["review"])
+        review = json.loads(review_path.read_text(encoding="utf-8"))
+        after = self.conn.execute(
+            "SELECT COUNT(*) FROM verification_reviews"
+        ).fetchone()[0]
+        self.assertEqual(result["prepared"], 1)
+        self.assertEqual(review["verdict"], "pending")
+        self.assertFalse(review["checklist"]["answer_derived"])
+        self.assertEqual(before, after)
+
+    def test_agent_context_and_handoff_are_compact_read_only_snapshots(self):
+        context = notebook.agent_context(
+            self.conn, self.db, ROOT, "verify"
+        )
+        self.assertEqual(context["task"], "verify")
+        self.assertIn("required_reference", context)
+        self.assertIn("prepare-audit-batch", " ".join(context["commands"]))
+        handoff = notebook.handoff_snapshot(self.conn, self.db, ROOT)
+        self.assertIn("unverified_issues", handoff)
+        self.assertLessEqual(len(handoff["top_pending_sources"]), 5)
+        self.assertEqual(handoff["defaults"], {"answers": False, "print": False})
 
     def test_verification_requires_all_review_checks(self):
         notebook.import_records(

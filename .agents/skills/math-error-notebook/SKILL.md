@@ -7,6 +7,7 @@ description: Manage a Chinese high-school math error notebook backed by one loca
 
 ## Fast path
 
+- Start routine work with one compact, read-only call: `scripts/notebook.py agent-context --task grade|recommend|verify|import|review|pdf|maintenance --json`. Use `doctor --json` for environment health and `handoff --json` for a compact transfer snapshot.
 - Use image input directly for photos; never claim to switch models/providers.
 - Run deterministic work through `scripts/notebook.py`. Its project installation binds to the sole bank `data/math_notebook.db`; never discover, merge, copy over, or select another same-named DB.
 - Do not recursively enumerate `data/audits/`, `data/imports/`, or the question corpus. Use compact CLI queries.
@@ -25,10 +26,11 @@ python -B <skill-dir>\scripts\notebook.py knowledge --text "相关主题" --json
 python -B <skill-dir>\scripts\notebook.py features --text "相切" --json
 ```
 
-4. Copy `assets/error-analysis-template.json`, fill it with LaTeX, then persist:
+4. Copy `assets/error-analysis-template.json`, fill it with LaTeX, validate it, then persist:
 
 ```powershell
-python -B <skill-dir>\scripts\notebook.py record-error <analysis.json> --copy-image --json
+python -B <skill-dir>\scripts\notebook.py grade-preview <analysis.json> --json
+python -B <skill-dir>\scripts\notebook.py grade-commit <analysis.json> --copy-image --json
 ```
 
 5. Lead with the first wrong step, cause, correct method, prevention cue, and saved error ID. Read `references/error-taxonomy.md` only when cause selection is ambiguous; read `references/data-contract.md` only if the template or validation fails.
@@ -39,7 +41,8 @@ Preview compact, same-type verified matches with 1-3 discriminative keywords; sa
 
 ```powershell
 python -B <skill-dir>\scripts\notebook.py recommend <error-id> --feature tangent --keyword "圆" --limit 3 --json
-python -B <skill-dir>\scripts\notebook.py recommend <error-id> --feature tangent --keyword "圆" --limit 3 --save --replace --json
+python -B <skill-dir>\scripts\notebook.py recommend-packet <error-id> --feature tangent --keyword "圆" --limit 3 --out <packet.json> --json
+python -B <skill-dir>\scripts\notebook.py assign-recommendations <error-id> <reviewed-plan.json> --save --json
 ```
 
 - Default output hides answers/solutions. Ranking uses knowledge, cause, difficulty, attempt history, and auditable structural features. Use `question <id> --json` only for shortlisted items; use `search ... --json` for compact fallback search.
@@ -57,7 +60,7 @@ After grading practice, record it with `attempt <question-id> --error-id <error-
 
 ## Import and verify
 
-Read `references/import-and-verification.md` only for question import, source repair, coverage audit, or verification work. Use `audit-item` then `verify-item` for the two-stage audit path. For the user-confirmed reliable batch `2026-07-19-g11-beijing-20`, a full independent re-solve of every question may be skipped, but each item still requires checks of completeness, duplicates, answer/solution consistency, tags, provenance, and a recorded `audit-item → verify-item` review. This exception applies only to that batch. For all other sources, external `verified` values, source reputation, sampling, and bulk SQL never justify verification.
+Read `references/import-and-verification.md` only for question import, source repair, coverage audit, or verification work. Use `prepare-audit-batch` to create per-item `audit-item` packets and safe pending review skeletons, then complete each review and call `verify-item`; the preparation command never changes verification state. For the user-confirmed reliable batch `2026-07-19-g11-beijing-20`, a full independent re-solve of every question may be skipped, but each item still requires checks of completeness, duplicates, answer/solution consistency, tags, provenance, and a recorded `audit-item → verify-item` review. This exception applies only to that batch. For all other sources, external `verified` values, source reputation, sampling, and bulk SQL never justify verification.
 
 ## Review and progress
 

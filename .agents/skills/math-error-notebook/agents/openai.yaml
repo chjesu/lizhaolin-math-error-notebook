@@ -1,0 +1,7 @@
+interface:
+  display_name: "高中数学智能错题本"
+  short_description: "错题批改、错因诊断、已验证题推荐、PDF打印与复习追踪"
+  default_prompt: "使用 $math-error-notebook 批改这张高中数学错题，保存错因，推荐已验证练习并输出打印版 PDF。"
+
+policy:
+  allow_implicit_invocation: true

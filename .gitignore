@@ -1,0 +1,24 @@
+# Runtime data and generated student artifacts
+data/math_notebook.db
+data/audits/
+data/imports/
+data/raw/
+data/images/
+data/backups/
+errors/
+practice/
+output/
+tmp/
+
+# Python/runtime caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Generated documents and local office lock files
+*.pdf
+~$*
+
+# Local editor/OS files
+.DS_Store
+Thumbs.db

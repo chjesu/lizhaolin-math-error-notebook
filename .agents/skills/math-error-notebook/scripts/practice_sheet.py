@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import html
-import importlib.util
 import itertools
 import json
 import os
@@ -29,24 +28,52 @@ DEFAULT_PROJECT_NAME = "李兆霖数学错题本"
 LOCAL_PDF_RUNTIME = PROJECT_ROOT / "runtime" / "pdf"
 PDF_REQUIREMENTS = PROJECT_ROOT / "requirements-pdf.txt"
 MPL_CONFIG_DIR = PROJECT_ROOT / "tmp" / "pdfs" / "matplotlib"
+BUNDLED_PYTHON = (
+    Path.home() / ".cache" / "codex-runtimes" / "codex-primary-runtime"
+    / "dependencies" / "python" / "python.exe"
+)
 
-if LOCAL_PDF_RUNTIME.is_dir() and str(LOCAL_PDF_RUNTIME) not in sys.path:
+# The project-local PDF runtime contains native wheels for the bundled Python.
+# Do not expose those wheels to another Python ABI merely because find_spec()
+# can see them.  Under the bundled interpreter, preload its working Pillow
+# before adding the local runtime, which supplies matplotlib and other pinned
+# packages without shadowing Pillow with a stale/broken copy.
+_running_bundled_python = (
+    BUNDLED_PYTHON.is_file()
+    and Path(sys.executable).resolve() == BUNDLED_PYTHON.resolve()
+)
+if _running_bundled_python:
+    try:
+        import PIL.Image  # noqa: F401
+    except ImportError:
+        pass
+if (
+    LOCAL_PDF_RUNTIME.is_dir()
+    and (_running_bundled_python or not BUNDLED_PYTHON.is_file())
+    and str(LOCAL_PDF_RUNTIME) not in sys.path
+):
     sys.path.insert(0, str(LOCAL_PDF_RUNTIME))
 MPL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(MPL_CONFIG_DIR))
 
 
 def bundled_python() -> Path | None:
-    candidate = (
-        Path.home() / ".cache" / "codex-runtimes" / "codex-primary-runtime"
-        / "dependencies" / "python" / "python.exe"
-    )
-    return candidate if candidate.is_file() else None
+    return BUNDLED_PYTHON if BUNDLED_PYTHON.is_file() else None
 
 
 def missing_pdf_modules() -> list[str]:
-    required = {"reportlab": "reportlab", "Pillow": "PIL", "matplotlib": "matplotlib"}
-    return [name for name, module in required.items() if importlib.util.find_spec(module) is None]
+    required = {
+        "reportlab": "reportlab.lib.colors",
+        "Pillow": "PIL.Image",
+        "matplotlib": "matplotlib",
+    }
+    missing: list[str] = []
+    for name, module in required.items():
+        try:
+            __import__(module)
+        except (ImportError, OSError):
+            missing.append(name)
+    return missing
 
 
 def ensure_pdf_runtime() -> None:
@@ -219,9 +246,101 @@ def _extract_math(text: str) -> str:
     return "".join(out)
 
 
+_FRAC_STYLE_COMMANDS = ("\\dfrac", "\\tfrac", "\\frac", "\\binom")
+_ONE_ARG_MATH_COMMANDS = ("\\sqrt", "\\vec")
+_CJK_MATH_PUNCT = str.maketrans("，；：（）．", ",;:().")
+
+
+def _read_math_token(latex: str, index: int) -> tuple[str, int] | None:
+    """Read one argument token at *index*; bare tokens are returned braced."""
+    n = len(latex)
+    while index < n and latex[index] in " \t":
+        index += 1
+    if index >= n:
+        return None
+    if latex[index] == "{":
+        depth = 0
+        k = index
+        while k < n:
+            if latex[k] == "{":
+                depth += 1
+            elif latex[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    return latex[index:k + 1], k + 1
+            k += 1
+        return None  # unbalanced braces: let the caller keep the source literal
+    if latex[index] == "\\":
+        k = index + 1
+        while k < n and latex[k].isalpha():
+            k += 1
+        if k == index + 1:
+            return None
+        return "{" + latex[index:k] + "}", k
+    return "{" + latex[index] + "}", index + 1
+
+
+def _normalize_math_args(latex: str) -> str:
+    """Brace bare single-token arguments so mathtext accepts TeX shorthand.
+
+    Bank content carries real-LaTeX shorthand such as ``\\frac12``,
+    ``\\frac{\\sqrt{10}}5``, ``\\sqrt3`` or ``\\vec a``: valid in TeX (single
+    tokens need no braces) but rejected by matplotlib mathtext, which used to
+    push those segments into the plain-text fallback (e.g. ``e=frac√105``).
+    Normalizing keeps every such segment image-rendered. ``\\sqrt[n]{...}`` is
+    left untouched because mathtext does not support it at all.
+    """
+    commands = _FRAC_STYLE_COMMANDS + _ONE_ARG_MATH_COMMANDS
+    out: list[str] = []
+    i = 0
+    n = len(latex)
+    while i < n:
+        if latex[i] != "\\":
+            out.append(latex[i])
+            i += 1
+            continue
+        command = next((c for c in commands if latex.startswith(c, i)), None)
+        if command is None:
+            out.append(latex[i])
+            i += 1
+            continue
+        after = i + len(command)
+        if after < n and latex[after].isalpha():  # a longer command name
+            out.append(latex[i])
+            i += 1
+            continue
+        if command == "\\sqrt":
+            probe = after
+            while probe < n and latex[probe] in " \t":
+                probe += 1
+            if probe < n and latex[probe] == "[":
+                out.append(latex[i])
+                i += 1
+                continue
+        arity = 2 if command in _FRAC_STYLE_COMMANDS else 1
+        args: list[str] = []
+        j = after
+        ok = True
+        for _ in range(arity):
+            token = _read_math_token(latex, j)
+            if token is None:
+                ok = False
+                break
+            args.append(token[0])
+            j = token[1]
+        if not ok:
+            out.append(latex[i])
+            i += 1
+            continue
+        out.append(command + "".join(args))
+        i = j
+    return "".join(out)
+
+
 def _render_math_image(latex: str, font_size: float) -> tuple[str, float, float]:
     """Render one math segment with matplotlib mathtext; return (url, w_pt, h_pt)."""
     import matplotlib
+    latex = _normalize_math_args(latex)
     key = hashlib.sha256(
         f"{MATH_CACHE_VERSION}|{matplotlib.__version__}|{latex}|{font_size:.2f}".encode("utf-8")
     ).hexdigest()[:16]
@@ -246,6 +365,9 @@ def _math_img_tag(placeholder: str, font_size: float) -> str:
     if registered is None:
         return placeholder
     latex, display = registered
+    # 数学段内的全角标点（多为题干排版带入的 ，；（）：．）转成半角后即可
+    # 正常图片渲染，避免整段因一个全角逗号退回 "(√2)/(2)" 式文本。
+    latex = latex.translate(_CJK_MATH_PUNCT)
     # Segments mathtext cannot handle (CJK text, unsupported constructs) fall
     # back to the plain-text conversion for that segment only.
     if _HAS_CJK.search(latex):
@@ -272,6 +394,7 @@ def clean_math(text: str | None) -> str:
 
 def _latex_to_text(value: str) -> str:
     value = re.sub(r"!\[[^\]]*\]\([^)]*\)", "[题图见原题]", value)
+    value = _normalize_math_args(value)
     value = value.replace("\\left", "").replace("\\right", "")
     value = re.sub(r"\^\{2\}", "²", value)
     value = re.sub(r"\^\{3\}", "³", value)

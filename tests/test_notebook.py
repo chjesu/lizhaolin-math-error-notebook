@@ -655,6 +655,45 @@ class NotebookTests(unittest.TestCase):
         self.assertIn(".png", html_text)
         self.assertNotIn("ZZMATH", html_text)
 
+    def test_practice_sheet_normalizes_bare_math_args(self):
+        cases = {
+            r"\frac12": r"\frac{1}{2}",
+            r"\frac{\sqrt{10}}5": r"\frac{\sqrt{10}}{5}",
+            r"\dfrac\pi2": r"\dfrac{\pi}{2}",
+            r"S=\frac12 ABd": r"S=\frac{1}{2} ABd",
+            r"\sqrt3\sin x": r"\sqrt{3}\sin x",
+            r"\vec a": r"\vec{a}",
+            r"\frac{1}{2}": r"\frac{1}{2}",
+            r"\sqrt[3]{8}": r"\sqrt[3]{8}",
+        }
+        for source, expected in cases.items():
+            self.assertEqual(practice_sheet._normalize_math_args(source), expected)
+
+    def test_practice_sheet_renders_tex_shorthand_as_images(self):
+        # 题库中存在 TeX 简写（单 token 参数不带花括号），mathtext 原生拒绝，
+        # 规范化后必须走图片渲染而不是退回 "frac√105" 式文本。
+        for latex in (r"e=\frac{\sqrt{10}}5", r"\frac12", r"\sqrt3", r"\vec a"):
+            url, width, height = practice_sheet._render_math_image(latex, 11.37)
+            self.assertTrue(Path(url).is_file())
+            self.assertGreater(width, 0)
+            self.assertGreater(height, 0)
+        html_text = practice_sheet.paragraph_text(
+            r"若椭圆$\frac{x^2}{5}+\frac{y^2}{m}=1$的离心率为$e=\frac{\sqrt{10}}5$，求实数$m$。"
+        )
+        self.assertIn("<img src=", html_text)
+        self.assertNotIn("frac", html_text)
+        self.assertNotIn("√", html_text)
+
+    def test_practice_sheet_renders_fullwidth_punct_math_as_image(self):
+        # 数学段内混入全角标点不应整段退回文本式写法。
+        html_text = practice_sheet.paragraph_text(
+            r"点$\left(\sqrt{2}，\frac{\sqrt{2}}{2}\right)$在椭圆上"
+        )
+        self.assertIn("<img src=", html_text)
+        self.assertNotIn("√", html_text)
+        # 含真实中文的数学段仍然回退纯文本。
+        self.assertNotIn("<img", practice_sheet.paragraph_text(r"$点P在圆外$"))
+
     def test_practice_sheet_falls_back_for_cjk_math(self):
         html_text = practice_sheet.paragraph_text(r"段 $点P在圆外$ 回退")
         self.assertNotIn("<img", html_text)

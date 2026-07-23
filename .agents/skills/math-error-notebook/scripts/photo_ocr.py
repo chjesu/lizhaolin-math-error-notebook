@@ -273,7 +273,13 @@ def prepare_image(path: Path, max_side: int) -> tuple[Any, tuple[int, int]]:
 
     with Image.open(path) as source:
         original_size = source.size
-        image = ImageOps.exif_transpose(source).convert("RGB")
+        transposed = ImageOps.exif_transpose(source)
+        if "A" in transposed.getbands() or "transparency" in transposed.info:
+            rgba = transposed.convert("RGBA")
+            white = Image.new("RGBA", rgba.size, "white")
+            image = Image.alpha_composite(white, rgba).convert("RGB")
+        else:
+            image = transposed.convert("RGB")
         image = _resize_to_limit(image, max_side)
         image = ImageOps.autocontrast(image, cutoff=1)
         image = ImageEnhance.Contrast(image).enhance(1.08)

@@ -848,6 +848,21 @@ class NotebookTests(unittest.TestCase):
             photo_ocr.orientation_score(vertical),
         )
 
+    def test_photo_ocr_prepare_image_composites_transparency_on_white(self):
+        from PIL import Image as PILImage
+
+        source = self.root / "transparent.png"
+        image = PILImage.new("RGBA", (40, 20), (0, 0, 0, 0))
+        for x in range(10, 30):
+            image.putpixel((x, 10), (0, 0, 0, 255))
+        image.save(source)
+
+        prepared, original_size = photo_ocr.prepare_image(source, max_side=100)
+
+        self.assertEqual(original_size, (40, 20))
+        self.assertGreaterEqual(min(prepared.getpixel((0, 0))), 250)
+        self.assertLessEqual(max(prepared.getpixel((20, 10))), 5)
+
     def test_photo_ocr_preflight_rotates_crops_and_caches(self):
         from PIL import Image as PILImage
 

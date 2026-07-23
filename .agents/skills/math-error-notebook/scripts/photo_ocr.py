@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import subprocess
 import sys
@@ -24,6 +25,8 @@ SKILL_DIR = SCRIPT_DIR.parent
 PROJECT_ROOT = SKILL_DIR.parents[2]
 OCR_RUNTIME = PROJECT_ROOT / ".runtime" / "ocr"
 OCR_REQUIREMENTS = PROJECT_ROOT / "requirements-ocr.txt"
+PADDLE_WORKER = SCRIPT_DIR / "paddle_formula_worker.py"
+PADDLE_FORMULA_MODEL = "PP-FormulaNet_plus-M"
 BUNDLED_PYTHON = (
     Path.home() / ".cache" / "codex-runtimes" / "codex-primary-runtime"
     / "dependencies" / "python" / "python.exe"
@@ -65,6 +68,155 @@ def ocr_runtime_status(project_root: Path = PROJECT_ROOT) -> dict[str, Any]:
         "onnxruntime": onnxruntime.is_dir(),
         "models": len(model_files),
     }
+
+
+def paddle_formula_runtime_status(
+    project_root: Path = PROJECT_ROOT,
+) -> dict[str, Any]:
+    runtime = project_root / ".runtime" / "paddleocr"
+    worker = (
+        project_root
+        / ".agents"
+        / "skills"
+        / "math-error-notebook"
+        / "scripts"
+        / "paddle_formula_worker.py"
+    )
+    model_dir = (
+        project_root
+        / ".runtime"
+        / "paddle-home"
+        / "paddlex"
+        / "official_models"
+        / PADDLE_FORMULA_MODEL
+    )
+    packages = {
+        "paddle": (runtime / "paddle").is_dir(),
+        "paddleocr": (runtime / "paddleocr").is_dir(),
+        "paddlex": (runtime / "paddlex").is_dir(),
+        "formula_dependencies": (runtime / "latex2mathml").is_dir(),
+    }
+    return {
+        "available": all(packages.values()) and worker.is_file(),
+        "runtime": str(runtime.resolve()),
+        "model": PADDLE_FORMULA_MODEL,
+        "model_cached": model_dir.is_dir()
+        and any(model_dir.glob("*.json"))
+        and any(model_dir.glob("*.pdiparams")),
+        "packages": packages,
+        "worker": worker.is_file(),
+        "purpose": "assistive_formula_ocr",
+    }
+
+
+def _formula_ocr_mode(mode: str, project_root: Path) -> str:
+    if mode not in {"auto", "off", "paddle"}:
+        raise ValueError("formula_ocr must be auto, off, or paddle")
+    if mode == "off":
+        return "off"
+    available = paddle_formula_runtime_status(project_root)["available"]
+    if mode == "paddle" and not available:
+        install = (
+            f'"{bundled_python() or Path(sys.executable)}" -m pip install '
+            f'--no-cache-dir --target "{project_root / ".runtime" / "paddleocr"}" '
+            f'-r "{project_root / "requirements-paddleocr.txt"}"'
+        )
+        raise RuntimeError(
+            "Paddle formula OCR runtime is incomplete. Install it once with: "
+            + install
+        )
+    return "paddle" if available else "off"
+
+
+def _paddle_environment(project_root: Path) -> dict[str, str]:
+    runtime = (project_root / ".runtime" / "paddleocr").resolve()
+    home = (project_root / ".runtime" / "paddle-home").resolve()
+    cache = home / "cache"
+    paddlex_cache = home / "paddlex"
+    for path in (home, cache, paddlex_cache):
+        path.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "USERPROFILE": str(home),
+            "XDG_CACHE_HOME": str(cache),
+            "PADDLE_HOME": str(cache / "paddle"),
+            "PADDLE_PDX_CACHE_HOME": str(paddlex_cache),
+            "PADDLE_PDX_MODEL_SOURCE": "BOS",
+            "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True",
+            "PYTHONPATH": os.pathsep.join(
+                part
+                for part in (str(runtime), env.get("PYTHONPATH", ""))
+                if part
+            ),
+            "GLOG_minloglevel": "2",
+        }
+    )
+    return env
+
+
+def run_paddle_formula_ocr(
+    crop_paths: list[Path],
+    project_root: Path,
+    timeout_seconds: int = 180,
+    runner: Callable[..., Any] = subprocess.run,
+) -> dict[str, Any]:
+    if not crop_paths:
+        return {
+            "status": "skipped",
+            "reason": "no_detail_crops",
+            "engine": "PaddleOCR 3.7.0 / PP-FormulaNet_plus-M",
+            "formulas": [],
+        }
+    python = bundled_python()
+    if not python:
+        raise RuntimeError("Codex bundled Python was not found")
+    command = [
+        str(python),
+        "-B",
+        str(PADDLE_WORKER),
+        "--project-root",
+        str(project_root.resolve()),
+    ]
+    for path in crop_paths:
+        command.extend(["--image", str(path.resolve())])
+    try:
+        completed = runner(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+            env=_paddle_environment(project_root),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"Paddle formula OCR timed out after {timeout_seconds}s"
+        ) from exc
+    if completed.returncode != 0:
+        diagnostic = (completed.stderr or completed.stdout or "").strip()
+        raise RuntimeError(
+            "Paddle formula OCR failed: " + diagnostic[-1200:]
+        )
+    marker = "FORMULA_OCR_JSON="
+    payload_line = next(
+        (
+            line[len(marker) :]
+            for line in reversed((completed.stdout or "").splitlines())
+            if line.startswith(marker)
+        ),
+        None,
+    )
+    if not payload_line:
+        raise RuntimeError("Paddle formula OCR returned no structured result")
+    try:
+        return json.loads(payload_line)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "Paddle formula OCR returned invalid structured JSON"
+        ) from exc
 
 
 def ensure_ocr_runtime() -> None:
@@ -294,6 +446,7 @@ def process_photos(
     max_detail_crops: int = 6,
     force: bool = False,
     engine_factory: Callable[[], Any] | None = None,
+    formula_ocr: str = "auto",
 ) -> dict[str, Any]:
     paths = [path.resolve() for path in image_paths]
     missing = [str(path) for path in paths if not path.is_file()]
@@ -303,13 +456,26 @@ def process_photos(
         raise ValueError("at least one photo is required")
 
     key = _batch_key(paths)
+    effective_formula_ocr = _formula_ocr_mode(formula_ocr, project_root)
+    ocr_profile = {
+        "rapidocr": "3.9.2 / PP-OCRv6",
+        "formula_ocr_requested": formula_ocr,
+        "formula_ocr_effective": effective_formula_ocr,
+        "formula_model": (
+            PADDLE_FORMULA_MODEL if effective_formula_ocr == "paddle" else None
+        ),
+    }
     if out_dir is None:
         out_dir = project_root / "data" / "grade-inputs" / f"photo-{key}"
     out_dir = out_dir.resolve()
     packet_path = out_dir / "ocr-packet.json"
     if packet_path.is_file() and not force:
         packet = json.loads(packet_path.read_text(encoding="utf-8"))
-        return _compact_result(packet, packet_path, cache_hit=True)
+        if (
+            int(packet.get("schema_version", 0)) >= 2
+            and packet.get("ocr_profile") == ocr_profile
+        ):
+            return _compact_result(packet, packet_path, cache_hit=True)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     engine = (engine_factory or _load_engine)()
@@ -318,6 +484,7 @@ def process_photos(
     total_detail_crops = 0
     total_original_pixels = 0
     total_preview_pixels = 0
+    crop_metadata: dict[str, dict[str, Any]] = {}
 
     for page_number, path in enumerate(paths, start=1):
         image, original_size = prepare_image(path, max_side)
@@ -334,6 +501,11 @@ def process_photos(
         detail_crops = save_detail_crops(
             image, lines, page_dir, min_confidence, max_detail_crops
         )
+        for crop in detail_crops:
+            crop_metadata[str(Path(crop["path"]).resolve())] = {
+                **crop,
+                "page": page_number,
+            }
 
         text = "\n".join(line["text"] for line in lines)
         confidences = [float(line["confidence"]) for line in lines]
@@ -361,18 +533,75 @@ def process_photos(
                 ),
                 "lines": lines,
                 "detail_crops": detail_crops,
+                "formula_ocr": [],
             }
         )
 
+    formula_summary: dict[str, Any] = {
+        "status": "disabled",
+        "engine": None,
+        "device": None,
+        "formulas": [],
+    }
+    formula_warning: str | None = None
+    if effective_formula_ocr == "paddle":
+        try:
+            formula_summary = run_paddle_formula_ocr(
+                [Path(path) for path in crop_metadata],
+                project_root,
+            )
+        except RuntimeError as exc:
+            if formula_ocr == "paddle":
+                raise
+            formula_warning = str(exc)
+            formula_summary = {
+                "status": "fallback",
+                "engine": "RapidOCR only",
+                "device": None,
+                "formulas": [],
+            }
+
+    formula_count = 0
+    for formula in formula_summary.get("formulas", []):
+        path = str(Path(formula.get("path", "")).resolve())
+        crop = crop_metadata.get(path)
+        latex = str(formula.get("latex", "")).strip()
+        if not crop or not latex:
+            continue
+        page_index = int(crop["page"]) - 1
+        pages[page_index]["formula_ocr"].append(
+            {
+                "crop_path": path,
+                "latex": latex,
+                "bounds": crop["bounds"],
+                "crop_reason": crop["reason"],
+                "requires_visual_confirmation": True,
+            }
+        )
+        formula_count += 1
+
     packet = {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at": now_iso(),
-        "engine": "RapidOCR 3.9.2 / PP-OCRv6",
+        "engine": "RapidOCR 3.9.2 / PP-OCRv6"
+        + (
+            f" + {formula_summary.get('engine')}"
+            if formula_summary.get("status") == "ok"
+            else ""
+        ),
+        "ocr_profile": ocr_profile,
         "purpose": "assistive_preflight_for_math_photo_grading",
         "batch_key": key,
         "pages": pages,
+        "formula_ocr": {
+            key: value
+            for key, value in formula_summary.items()
+            if key != "formulas"
+        },
+        "warnings": [formula_warning] if formula_warning else [],
         "model_workflow": [
             "Read ocr_text before opening an image.",
+            "Use formula_ocr LaTeX as a locator, not as trusted transcription.",
             "Open model_preview_path to separate printed question from handwriting.",
             "Open only relevant detail_crops when a formula or step is ambiguous.",
             "Use normalized_path only as a final fallback.",
@@ -385,6 +614,7 @@ def process_photos(
         "metrics": {
             "ocr_characters": total_characters,
             "detail_crops": total_detail_crops,
+            "formula_candidates": formula_count,
             "preview_pixel_ratio": (
                 round(total_preview_pixels / total_original_pixels, 4)
                 if total_original_pixels
@@ -409,6 +639,11 @@ def _compact_result(
         "pages": len(pages),
         "ocr_characters": packet.get("metrics", {}).get("ocr_characters", 0),
         "detail_crops": packet.get("metrics", {}).get("detail_crops", 0),
+        "formula_candidates": packet.get("metrics", {}).get(
+            "formula_candidates", 0
+        ),
+        "formula_ocr_status": packet.get("formula_ocr", {}).get("status"),
+        "formula_ocr_device": packet.get("formula_ocr", {}).get("device"),
         "preview_pixel_ratio": packet.get("metrics", {}).get("preview_pixel_ratio"),
         "preview_paths": [page.get("model_preview_path") for page in pages],
         "cache_hit": cache_hit,

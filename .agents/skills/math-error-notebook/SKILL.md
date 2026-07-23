@@ -22,6 +22,14 @@ description: Manage a Chinese high-school math error notebook backed by one loca
 python -B <skill-dir>\scripts\notebook.py photo-preflight <image...> --json
 ```
 
+`photo-preflight` defaults to `--formula-ocr auto`: RapidOCR handles orientation,
+printed text, previews, and detail crops; when the isolated project-local Paddle
+runtime is installed, only those small crops receive GPU formula recognition.
+Use `--formula-ocr off` for RapidOCR-only operation or `--formula-ocr paddle` to
+require the formula stage. Read `formula_ocr` as an untrusted LaTeX locator.
+Never accept its Chinese text or mathematical notation without checking the
+referenced crop.
+
 2. Separate printed content from handwriting; reconstruct steps and identify the first substantive error.
 3. If a key symbol, condition, diagram, or step is unreadable, state it and request a clearer crop. Never fabricate. Use `unclear` for insufficient evidence; use `careless` only with direct evidence.
 4. Get compact codes instead of loading full catalogs:

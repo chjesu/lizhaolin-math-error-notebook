@@ -6,6 +6,7 @@ import unittest
 from argparse import Namespace
 from datetime import date, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -891,6 +892,96 @@ class NotebookTests(unittest.TestCase):
             engine_factory=lambda: self.fail("cache should avoid OCR engine"),
         )
         self.assertTrue(cached["cache_hit"])
+
+    def test_paddle_formula_runner_returns_only_structured_marker(self):
+        image = self.root / "formula.jpg"
+        image.write_bytes(b"fake")
+
+        class Completed:
+            returncode = 0
+            stdout = (
+                "Paddle informational output\n"
+                'FORMULA_OCR_JSON={"status":"ok","device":"gpu:0",'
+                '"engine":"test","formulas":[{"path":"formula.jpg",'
+                '"latex":"x^2","requires_visual_confirmation":true}]}\n'
+            )
+            stderr = "ignored warning"
+
+        captured = {}
+
+        def fake_runner(command, **kwargs):
+            captured["command"] = command
+            captured["env"] = kwargs["env"]
+            return Completed()
+
+        result = photo_ocr.run_paddle_formula_ocr(
+            [image],
+            self.root,
+            runner=fake_runner,
+        )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["device"], "gpu:0")
+        self.assertEqual(result["formulas"][0]["latex"], "x^2")
+        self.assertIn("--image", captured["command"])
+        self.assertEqual(
+            captured["env"]["PADDLE_PDX_CACHE_HOME"],
+            str((self.root / ".runtime" / "paddle-home" / "paddlex").resolve()),
+        )
+
+    def test_photo_ocr_packet_attaches_formula_to_detail_crop(self):
+        from PIL import Image as PILImage
+
+        source = self.root / "formula-source.jpg"
+        PILImage.new("RGB", (600, 300), "white").save(source)
+
+        class FakeResult:
+            boxes = [[[20, 40], [500, 40], [500, 100], [20, 100]]]
+            txts = ("x+1=2",)
+            scores = (0.93,)
+
+        class FakeEngine:
+            def __call__(self, _image):
+                return FakeResult()
+
+        def fake_formula(crop_paths, _project_root):
+            return {
+                "status": "ok",
+                "engine": "PaddleOCR test",
+                "device": "gpu:0",
+                "predict_seconds": 0.1,
+                "formulas": [
+                    {
+                        "path": str(crop_paths[0].resolve()),
+                        "latex": "x+1=2",
+                        "requires_visual_confirmation": True,
+                    }
+                ],
+            }
+
+        with (
+            patch.object(photo_ocr, "_formula_ocr_mode", return_value="paddle"),
+            patch.object(
+                photo_ocr,
+                "run_paddle_formula_ocr",
+                side_effect=fake_formula,
+            ),
+        ):
+            result = photo_ocr.process_photos(
+                [source],
+                self.root,
+                out_dir=self.root / "formula-ocr",
+                engine_factory=FakeEngine,
+                formula_ocr="auto",
+            )
+        packet = json.loads(Path(result["packet"]).read_text(encoding="utf-8"))
+        self.assertEqual(result["formula_candidates"], 1)
+        self.assertEqual(result["formula_ocr_status"], "ok")
+        self.assertEqual(packet["pages"][0]["formula_ocr"][0]["latex"], "x+1=2")
+        self.assertTrue(
+            packet["pages"][0]["formula_ocr"][0][
+                "requires_visual_confirmation"
+            ]
+        )
 
 
 if __name__ == "__main__":

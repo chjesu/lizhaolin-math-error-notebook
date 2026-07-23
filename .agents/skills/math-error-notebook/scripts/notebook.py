@@ -2057,9 +2057,11 @@ def doctor(
         project_root / "PROJECT_ARCHITECTURE.md",
         project_root / ".agents" / "skills" / "math-error-notebook" / "SKILL.md",
         project_root / ".agents" / "skills" / "math-error-notebook" / "scripts" / "photo_ocr.py",
+        project_root / ".agents" / "skills" / "math-error-notebook" / "scripts" / "paddle_formula_worker.py",
         project_root / ".agents" / "skills" / "math-error-notebook" / "assets" / "error-analysis-template.json",
         project_root / ".agents" / "skills" / "math-error-notebook" / "assets" / "question-review-template.json",
         project_root / "requirements-ocr.txt",
+        project_root / "requirements-paddleocr.txt",
     )
     runtime = project_root / "runtime" / "pdf"
     added_runtime = False
@@ -2091,13 +2093,20 @@ def doctor(
     if not config.get("printer_name"):
         warnings.append("printer_not_configured")
     try:
-        from photo_ocr import ocr_runtime_status
+        from photo_ocr import (
+            ocr_runtime_status,
+            paddle_formula_runtime_status,
+        )
 
         ocr_runtime = ocr_runtime_status(project_root)
+        formula_ocr_runtime = paddle_formula_runtime_status(project_root)
     except (ImportError, OSError):
         ocr_runtime = {"available": False}
+        formula_ocr_runtime = {"available": False}
     if not ocr_runtime.get("available"):
         warnings.append("ocr_runtime_not_installed")
+    if not formula_ocr_runtime.get("available"):
+        warnings.append("paddle_formula_ocr_runtime_not_installed")
     return {
         "status": "ok" if all(checks.values()) else "error",
         "checks": checks,
@@ -2114,6 +2123,7 @@ def doctor(
         },
         "pdf_dependencies": pdf_dependencies,
         "ocr_runtime": ocr_runtime,
+        "formula_ocr_runtime": formula_ocr_runtime,
         "printer": config.get("printer_name"),
         "libreoffice": str(_find_soffice()) if _find_soffice() else None,
     }
@@ -2438,6 +2448,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--preview-side", type=int, default=1100)
     p.add_argument("--min-confidence", type=float, default=0.86)
     p.add_argument("--max-detail-crops", type=int, default=6)
+    p.add_argument(
+        "--formula-ocr",
+        choices=("auto", "off", "paddle"),
+        default="auto",
+        help="optional formula recognition; auto uses the isolated Paddle runtime when available",
+    )
     p.add_argument("--force", action="store_true")
     p.add_argument("--json", action="store_true")
 
@@ -2638,7 +2654,8 @@ def main(argv: list[str] | None = None) -> int:
                 max(600, min(args.preview_side, 1800)),
                 max(0.0, min(args.min_confidence, 1.0)),
                 max(0, min(args.max_detail_crops, 20)),
-                args.force,
+                force=args.force,
+                formula_ocr=args.formula_ocr,
             )
             print_output(payload, args.json, args.pretty_json)
             return 0

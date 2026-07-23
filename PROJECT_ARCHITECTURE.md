@@ -11,6 +11,7 @@
 - 来源：`104`；错题记录：`8`
 - 主执行器：`.agents/skills/math-error-notebook/scripts/notebook.py`
 - 组卷与打印：`.agents/skills/math-error-notebook/scripts/practice_sheet.py`
+- 照片 OCR 预检：`notebook.py photo-preflight`（实现位于 `photo_ocr.py`）
 - 默认打印机：`EPSON72097C (L3250 Series)`
 
 数量是 2026-07-22 的交接快照；实际状态以 `bank-info --json` 为准。
@@ -52,7 +53,8 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    IMG["错题照片/文字"] --> G["模型区分印刷内容与手写步骤"]
+    IMG["错题照片/文字"] --> OCR["photo-preflight：离线OCR、方向纠正、预览与疑难裁剪"]
+    OCR --> G["模型先读OCR文本，再按需查看小图并区分印刷内容与手写步骤"]
     G --> W["定位第一处实质性错误"]
     W --> J["填写 error-analysis-template.json"]
     J --> RE["record-error"]
@@ -123,6 +125,7 @@ flowchart LR
 | 智能体启动 | `doctor` | 一次检查唯一主库、schema、完整性、项目文件、PDF 依赖、LibreOffice 和打印配置 |
 | 智能体启动 | `agent-context` | 按 grade/recommend/verify/import/review/pdf/maintenance 返回最小规则与命令集合 |
 | 智能体交接 | `handoff` | 精简输出主库哈希、验证数量、主要问题、复习任务和 Git 状态 |
+| 照片预检 | `photo-preflight` | 离线 OCR、方向纠正、缓存、小预览及公式/低置信区域裁剪；不写主库，不替代视觉和数学判断 |
 | 初始化 | `init` | 创建 schema、装载知识点；主库存在时不得用来重建数据 |
 | 初始化 | `seed` | 幂等导入项目原创种子题，仅用于首次建库 |
 | 题库身份 | `bank-info` | 主库绝对路径、SHA256、schema、完整性、外键和数量 |
@@ -171,6 +174,7 @@ flowchart LR
 - 检索与统计：`stats`、`coverage`、`list_knowledge_points`、`list_cause_codes`、`list_feature_codes`、`question_detail`、`search_questions`
 - 审核与修复：`annotate_question`、`question_issue_codes`、`near_duplicate_candidates`、`audit_item`、`prepare_audit_batch`、`prepare_verification_reviews`、`apply_verification_review`、`apply_verification_review_batch`、`repair_embedded_options`、`audit_queue`、`audit_summary`
 - 启动与交接：`doctor`、`agent_context`、`handoff_snapshot`、`_git_summary`
+- 照片 OCR 辅助：`photo_ocr.py` 中的 `process_photos`、`choose_orientation`、`save_detail_crops`；只生成判题输入包
 - CLI：`print_output`、`build_parser`、`main`
 
 ## 6. `practice_sheet.py` 完整职责
@@ -334,7 +338,7 @@ python -B .agents\skills\math-error-notebook\scripts\notebook.py agent-context -
 
 固定流程：
 
-- 判题：`grade-preview → grade-commit`
+- 判题：`photo-preflight → 模型按需查看小图 → grade-preview → grade-commit`
 - 推荐：`recommend-packet → 模型复核 → assign-recommendations`
 - 批量 DOCX：`import_recent_docx_batch.py → audit_recent_docx_batch.py`
 - 验证：`prepare-audit-batch → 模型输出精简决策 → prepare-review-batch → verify-review-batch`

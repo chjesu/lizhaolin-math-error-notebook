@@ -2056,8 +2056,10 @@ def doctor(
         project_root / "AGENTS.md",
         project_root / "PROJECT_ARCHITECTURE.md",
         project_root / ".agents" / "skills" / "math-error-notebook" / "SKILL.md",
+        project_root / ".agents" / "skills" / "math-error-notebook" / "scripts" / "photo_ocr.py",
         project_root / ".agents" / "skills" / "math-error-notebook" / "assets" / "error-analysis-template.json",
         project_root / ".agents" / "skills" / "math-error-notebook" / "assets" / "question-review-template.json",
+        project_root / "requirements-ocr.txt",
     )
     runtime = project_root / "runtime" / "pdf"
     added_runtime = False
@@ -2088,6 +2090,14 @@ def doctor(
         warnings.append("libreoffice_not_found")
     if not config.get("printer_name"):
         warnings.append("printer_not_configured")
+    try:
+        from photo_ocr import ocr_runtime_status
+
+        ocr_runtime = ocr_runtime_status(project_root)
+    except (ImportError, OSError):
+        ocr_runtime = {"available": False}
+    if not ocr_runtime.get("available"):
+        warnings.append("ocr_runtime_not_installed")
     return {
         "status": "ok" if all(checks.values()) else "error",
         "checks": checks,
@@ -2103,6 +2113,7 @@ def doctor(
             "errors": info["errors"],
         },
         "pdf_dependencies": pdf_dependencies,
+        "ocr_runtime": ocr_runtime,
         "printer": config.get("printer_name"),
         "libreoffice": str(_find_soffice()) if _find_soffice() else None,
     }
@@ -2144,6 +2155,7 @@ def handoff_snapshot(
 AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
     "grade": {
         "commands": [
+            "photo-preflight <image...> --json",
             "causes --text <topic> --json",
             "knowledge --text <topic> --json",
             "features --text <structure> --json",
@@ -2415,6 +2427,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("analysis", type=Path, help="analysis JSON file")
     p.add_argument("--json", action="store_true")
 
+    p = sub.add_parser(
+        "photo-preflight",
+        help="create a cached offline OCR packet before photo grading",
+    )
+    p.add_argument("images", type=Path, nargs="+")
+    p.add_argument("--project-root", type=Path, default=DEFAULT_PROJECT_ROOT)
+    p.add_argument("--out-dir", type=Path)
+    p.add_argument("--max-side", type=int, default=2400)
+    p.add_argument("--preview-side", type=int, default=1100)
+    p.add_argument("--min-confidence", type=float, default=0.86)
+    p.add_argument("--max-detail-crops", type=int, default=6)
+    p.add_argument("--force", action="store_true")
+    p.add_argument("--json", action="store_true")
+
     p = sub.add_parser("grade-commit", help="validate and store an error analysis")
     p.add_argument("analysis", type=Path, help="analysis JSON file")
     p.add_argument("--project-root", type=Path, default=Path.cwd())
@@ -2600,6 +2626,22 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "photo-preflight":
+            from photo_ocr import ensure_ocr_runtime, process_photos
+
+            ensure_ocr_runtime()
+            payload = process_photos(
+                args.images,
+                args.project_root,
+                args.out_dir,
+                max(800, min(args.max_side, 5000)),
+                max(600, min(args.preview_side, 1800)),
+                max(0.0, min(args.min_confidence, 1.0)),
+                max(0, min(args.max_detail_crops, 20)),
+                args.force,
+            )
+            print_output(payload, args.json, args.pretty_json)
+            return 0
         conn = connect(args.db)
         if args.command == "init":
             payload = init_database(conn, args.knowledge_file)
@@ -2734,7 +2776,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
         print_output(payload, getattr(args, "json", False), args.pretty_json)
         return 0
-    except (ValueError, OSError, sqlite3.Error, json.JSONDecodeError) as exc:
+    except (ValueError, RuntimeError, OSError, sqlite3.Error, json.JSONDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

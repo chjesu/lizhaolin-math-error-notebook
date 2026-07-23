@@ -21,6 +21,12 @@ practice_sheet = importlib.util.module_from_spec(PRACTICE_SPEC)
 assert PRACTICE_SPEC.loader
 PRACTICE_SPEC.loader.exec_module(practice_sheet)
 
+PHOTO_OCR_SCRIPT = ROOT / ".agents" / "skills" / "math-error-notebook" / "scripts" / "photo_ocr.py"
+PHOTO_OCR_SPEC = importlib.util.spec_from_file_location("photo_ocr", PHOTO_OCR_SCRIPT)
+photo_ocr = importlib.util.module_from_spec(PHOTO_OCR_SPEC)
+assert PHOTO_OCR_SPEC.loader
+PHOTO_OCR_SPEC.loader.exec_module(photo_ocr)
+
 
 class NotebookTests(unittest.TestCase):
     def setUp(self):
@@ -824,6 +830,67 @@ class NotebookTests(unittest.TestCase):
         self.assertNotIn("题图见原题", text)
         self.assertNotIn("题图缺失", text)
         self.assertGreater(xobject_count(with_img_pdf), plain_images)
+
+    def test_photo_ocr_orientation_score_prefers_horizontal_lines(self):
+        horizontal = [{
+            "text": "x+1=2",
+            "confidence": 0.95,
+            "box": [[0, 0], [120, 0], [120, 20], [0, 20]],
+        }]
+        vertical = [{
+            "text": "x+1=2",
+            "confidence": 0.95,
+            "box": [[0, 0], [20, 0], [20, 120], [0, 120]],
+        }]
+        self.assertGreater(
+            photo_ocr.orientation_score(horizontal),
+            photo_ocr.orientation_score(vertical),
+        )
+
+    def test_photo_ocr_preflight_rotates_crops_and_caches(self):
+        from PIL import Image as PILImage
+
+        source = self.root / "portrait.jpg"
+        PILImage.new("RGB", (300, 900), "white").save(source)
+
+        class FakeResult:
+            def __init__(self, horizontal):
+                if horizontal:
+                    self.boxes = [[[20, 40], [260, 40], [260, 80], [20, 80]]]
+                else:
+                    self.boxes = [[[20, 40], [60, 40], [60, 280], [20, 280]]]
+                self.txts = ("x+1=2",)
+                self.scores = (0.93,)
+
+        class FakeEngine:
+            def __call__(self, image):
+                height, width = image.shape[:2]
+                return FakeResult(width > height)
+
+        out_dir = self.root / "ocr"
+        result = photo_ocr.process_photos(
+            [source],
+            self.root,
+            out_dir=out_dir,
+            max_side=600,
+            preview_side=400,
+            engine_factory=FakeEngine,
+        )
+        self.assertFalse(result["cache_hit"])
+        self.assertEqual(result["pages"], 1)
+        self.assertGreaterEqual(result["detail_crops"], 1)
+        packet = json.loads(Path(result["packet"]).read_text(encoding="utf-8"))
+        self.assertIn(packet["pages"][0]["rotation_degrees_ccw"], (90, 270))
+        self.assertIn("x+1=2", packet["pages"][0]["ocr_text"])
+        self.assertLess(packet["metrics"]["preview_pixel_ratio"], 1)
+
+        cached = photo_ocr.process_photos(
+            [source],
+            self.root,
+            out_dir=out_dir,
+            engine_factory=lambda: self.fail("cache should avoid OCR engine"),
+        )
+        self.assertTrue(cached["cache_hit"])
 
 
 if __name__ == "__main__":

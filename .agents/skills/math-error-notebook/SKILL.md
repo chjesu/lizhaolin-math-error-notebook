@@ -16,9 +16,15 @@ description: Manage a Chinese high-school math error notebook backed by one loca
 
 ## Grade work
 
-1. Separate printed content from handwriting; reconstruct steps and identify the first substantive error.
-2. If a key symbol, condition, diagram, or step is unreadable, state it and request a clearer crop. Never fabricate. Use `unclear` for insufficient evidence; use `careless` only with direct evidence.
-3. Get compact codes instead of loading full catalogs:
+1. For photos, first create the cached offline OCR packet. Read its text first, inspect the small preview, and open only relevant detail crops. OCR is assistive only; formulas, diagrams, and handwriting still require visual review:
+
+```powershell
+python -B <skill-dir>\scripts\notebook.py photo-preflight <image...> --json
+```
+
+2. Separate printed content from handwriting; reconstruct steps and identify the first substantive error.
+3. If a key symbol, condition, diagram, or step is unreadable, state it and request a clearer crop. Never fabricate. Use `unclear` for insufficient evidence; use `careless` only with direct evidence.
+4. Get compact codes instead of loading full catalogs:
 
 ```powershell
 python -B <skill-dir>\scripts\notebook.py causes --json
@@ -26,14 +32,14 @@ python -B <skill-dir>\scripts\notebook.py knowledge --text "相关主题" --json
 python -B <skill-dir>\scripts\notebook.py features --text "相切" --json
 ```
 
-4. Copy `assets/error-analysis-template.json`, fill it with LaTeX, validate it, then persist:
+5. Copy `assets/error-analysis-template.json`, fill it with LaTeX, validate it, then persist:
 
 ```powershell
 python -B <skill-dir>\scripts\notebook.py grade-preview <analysis.json> --json
 python -B <skill-dir>\scripts\notebook.py grade-commit <analysis.json> --copy-image --json
 ```
 
-5. Lead with the first wrong step, cause, correct method, prevention cue, and saved error ID. Read `references/error-taxonomy.md` only when cause selection is ambiguous; read `references/data-contract.md` only if the template or validation fails.
+6. Lead with the first wrong step, cause, correct method, prevention cue, and saved error ID. Read `references/error-taxonomy.md` only when cause selection is ambiguous; read `references/data-contract.md` only if the template or validation fails.
 
 ## Recommend and print
 

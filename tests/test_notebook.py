@@ -118,7 +118,7 @@ class NotebookTests(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(count, 0)
 
-    def test_recommendation_packet_writes_full_candidates_without_saving(self):
+    def test_recommendation_packet_is_compact_reusable_and_read_only(self):
         error_id = self.create_error()
         packet_path = self.root / "recommendation-packet.json"
         result = notebook.recommendation_packet(
@@ -126,12 +126,54 @@ class NotebookTests(unittest.TestCase):
         )
         packet = json.loads(packet_path.read_text(encoding="utf-8"))
         self.assertEqual(result["database_modified"], False)
+        self.assertEqual(result["content_mode"], "compact")
         self.assertGreaterEqual(result["candidates"], 1)
-        self.assertIn("answer", packet["items"][0])
+        self.assertNotIn("answer", packet["items"][0])
+        self.assertNotIn("solution", packet["items"][0])
         saved = self.conn.execute(
             "SELECT COUNT(*) FROM recommendations WHERE error_id=?", (error_id,)
         ).fetchone()[0]
         self.assertEqual(saved, 0)
+        assigned = notebook.assign_recommendations(
+            self.conn, error_id, packet["items"], self.root, False
+        )
+        self.assertEqual(len(assigned), len(packet["items"]))
+
+    def test_recommendation_packet_full_is_explicit(self):
+        error_id = self.create_error()
+        packet_path = self.root / "recommendation-packet-full.json"
+        result = notebook.recommendation_packet(
+            self.conn, error_id, 1, self.root, None, None, packet_path, True
+        )
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        self.assertEqual(result["content_mode"], "full")
+        self.assertIn("answer", packet["items"][0])
+        self.assertIn("solution", packet["items"][0])
+
+    def test_recommendation_local_keyword_split_and_placeholder_filter(self):
+        self.assertEqual(
+            notebook.normalize_recommendation_keywords(["双曲线 离心率，焦点"]),
+            ["双曲线", "离心率", "焦点"],
+        )
+        error_id = self.create_error()
+        malformed = {
+            "id": "Q-placeholder-local-filter",
+            "stem": "The introductory phrase should read: replace this placeholder.",
+            "answer": "Matches the stored final answer.",
+            "solution": "placeholder",
+            "grade": 10,
+            "question_type": "填空题",
+            "difficulty": 2.5,
+            "knowledge_codes": ["trig-identities"],
+            "verified": True,
+        }
+        notebook.import_records(
+            self.conn, [malformed], "占位题过滤测试", None, "Project-Original", True
+        )
+        items = notebook.recommend(
+            self.conn, error_id, 10, False, self.root, ["三角 恒等"], False, False
+        )
+        self.assertNotIn("Q-placeholder-local-filter", [item["question_id"] for item in items])
 
     def test_search_defaults_to_compact_rows(self):
         rows = notebook.search_questions(

@@ -56,10 +56,10 @@ Preview compact, same-type verified matches with 1-3 discriminative keywords; sa
 ```powershell
 python -B <skill-dir>\scripts\notebook.py recommend <error-id> --feature tangent --keyword "圆" --limit 3 --json
 python -B <skill-dir>\scripts\notebook.py recommend-packet <error-id> --feature tangent --keyword "圆" --limit 3 --out <packet.json> --json
-python -B <skill-dir>\scripts\notebook.py assign-recommendations <error-id> <reviewed-plan.json> --save --json
+python -B <skill-dir>\scripts\notebook.py assign-recommendations <error-id> <packet.json> --save --json
 ```
 
-- Default output hides answers/solutions. Ranking uses knowledge, cause, difficulty, attempt history, and auditable structural features. Use `question <id> --json` only for shortlisted items; use `search ... --json` for compact fallback search.
+- Default output and recommendation packets hide answers/solutions. Ranking, keyword tokenization, obvious placeholder rejection, difficulty progression, knowledge, cause, attempt history, and audited structural features run locally. Review the compact packet for relevance, then pass that same packet to `assign-recommendations`; do not create a second plan file. Use `question <id> --json` only for an ambiguous shortlisted item, or `recommend-packet --full` only when complete solutions are genuinely needed.
 - If automatic matches are weak, save a reviewed verified set with `assign-recommendations`; never substitute invented questions silently.
 - If fewer than three verified matches exist, report the shortfall and offer adjacent-topic search or generated questions labeled unverified.
 - After saving, create the A4 PDF (questions only by default; add `--with-answers` when the user wants an answer page) and print only when the user asks:

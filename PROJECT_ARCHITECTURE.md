@@ -140,7 +140,7 @@ flowchart LR
 | 错题预检/保存 | `grade-preview` / `grade-commit` | 写库前验证错因 JSON；粗心必须有直接证据；提交复用同一质量门 |
 | 错题撤销 | `delete-error` | 删除误保存的错题及受控派生文件 |
 | 推荐预览/保存 | `recommend` | 按知识点、错因、难度、作答史、关键词和结构特征排序已验证题 |
-| 推荐审核包 | `recommend-packet` | 将完整候选写入本地审核包，只返回精简 ID，不保存推荐 |
+| 推荐审核包 | `recommend-packet` | 本地完成关键词拆分、占位题过滤和排序，默认写入不含答案/长解析的精简审核包；同一审核包复核后可直接交给 `assign-recommendations` |
 | 人工推荐 | `assign-recommendations` | 用模型逐题复核后的已验证题替换自动候选 |
 | 复习到期 | `due` | 查询到期或逾期复习任务 |
 | 复习反馈 | `review` | 记录 correct/partial/wrong，并在失败时启动新周期 |
@@ -348,7 +348,7 @@ python -B .agents\skills\math-error-notebook\scripts\notebook.py agent-context -
 固定流程：
 
 - 判题：`photo-preflight → 模型按需查看小图 → grade-preview → grade-commit`
-- 推荐：`recommend-packet → 模型复核 → assign-recommendations`
+- 推荐：`recommend-packet --limit 3 → 模型只复核精简题干 → assign-recommendations <同一packet>`；仅对个别疑难候选调用 `question <id>`，不再默认加载全部答案与长解析
 - 批量 DOCX：`import_recent_docx_batch.py → audit_recent_docx_batch.py`
 - 验证：`prepare-audit-batch → 模型输出精简决策 → prepare-review-batch → verify-review-batch`
 - 交接：`handoff`

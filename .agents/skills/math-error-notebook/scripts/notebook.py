@@ -81,6 +81,14 @@ DEFAULT_KNOWLEDGE = SKILL_DIR / "assets/knowledge-points.json"
 DEFAULT_SEED = SKILL_DIR / "assets/seed-questions.jsonl"
 DEFAULT_PROJECT_ROOT = DEFAULT_DB.parent.parent
 RELIABLE_BATCH = "2026-07-19-g11-beijing-20"
+RECOMMENDATION_BLOCK_PATTERNS = (
+    "the introductory phrase should read",
+    "matches the stored final answer",
+    "placeholder",
+    "题干缺失",
+    "答案待补",
+    "待补充题干",
+)
 
 
 def now_iso() -> str:
@@ -930,6 +938,27 @@ def compact_recommendations(items: list[dict[str, Any]], full: bool) -> list[dic
     return [{key: item[key] for key in fields} for item in items]
 
 
+def normalize_recommendation_keywords(values: list[str] | None) -> list[str]:
+    """Turn CLI phrases into stable local tokens without model preprocessing."""
+    tokens: list[str] = []
+    for value in values or []:
+        for token in re.split(r"[\s,，;；|/]+", value.casefold()):
+            token = token.strip()
+            if token and token not in tokens:
+                tokens.append(token)
+    return tokens
+
+
+def recommendation_candidate_is_usable(row: sqlite3.Row) -> bool:
+    """Reject obvious import placeholders before they reach a model review packet."""
+    stem = (row["stem"] or "").strip()
+    answer = (row["answer"] or "").strip()
+    if len(stem) < 8 or not answer:
+        return False
+    searchable = f"{stem}\n{answer}".casefold()
+    return not any(pattern in searchable for pattern in RECOMMENDATION_BLOCK_PATTERNS)
+
+
 def question_feature_codes(
     conn: sqlite3.Connection,
     question_id: str,
@@ -1011,7 +1040,7 @@ def recommend(
     error, codes = fetch_error(conn, error_id)
     if not codes:
         raise ValueError("error has no knowledge codes; tag it before requesting recommendations")
-    keywords = [item.strip().casefold() for item in (keywords or []) if item.strip()]
+    keywords = normalize_recommendation_keywords(keywords)
     target_features = error_feature_codes(error, features)
     if save and replace:
         conn.execute("DELETE FROM recommendations WHERE error_id=?", (error_id,))
@@ -1031,6 +1060,7 @@ def recommend(
             GROUP BY q.id""",
         (error["cause_code"], *codes, error["question_id"], error_id),
     ))
+    rows = [row for row in rows if recommendation_candidate_is_usable(row)]
     if not rows:
         return []
     desired_offsets = (-0.6, -0.2, 0.0, 0.35, 0.8)
@@ -2177,8 +2207,9 @@ AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
     },
     "recommend": {
         "commands": [
-            "recommend-packet <error-id> --keyword <type> --feature <code> --out <packet.json> --json",
-            "assign-recommendations <error-id> <reviewed-plan.json> --save --json",
+            "recommend-packet <error-id> --limit 3 --keyword <type> --feature <code> --out <packet.json> --json",
+            "assign-recommendations <error-id> <packet.json> --save --json",
+            "question <id> --json only for an ambiguous shortlisted item",
             "practice_sheet.py <error-id>",
         ],
     },
@@ -2334,16 +2365,22 @@ def recommendation_packet(
     keywords: list[str] | None,
     features: list[str] | None,
     out_path: Path,
+    full: bool = False,
 ) -> dict[str, Any]:
     items = recommend(
-        conn, error_id, limit, False, project_root, keywords, False, True, features
+        conn, error_id, limit, False, project_root, keywords, False, full, features
     )
     packet = {
         "schema": "math-recommendation-review-packet/v1",
         "error_id": error_id,
         "generated_at": now_iso(),
         "review_required": True,
-        "save_command": f"assign-recommendations {error_id} <reviewed-plan.json> --save --json",
+        "content_mode": "full" if full else "compact",
+        "review_hint": (
+            "Review stem, options, source, difficulty, and reason locally. "
+            "Use `question <id> --json` only for an ambiguous shortlisted item."
+        ),
+        "save_command": f"assign-recommendations {error_id} {out_path} --save --json",
         "items": items,
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2353,6 +2390,8 @@ def recommendation_packet(
         "candidates": len(items),
         "packet": str(out_path.resolve()),
         "question_ids": [item["question_id"] for item in items],
+        "content_mode": packet["content_mode"],
+        "payload_characters": len(json.dumps(packet, ensure_ascii=False, separators=(",", ":"))),
         "database_modified": False,
     }
 
@@ -2479,12 +2518,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--project-root", type=Path, default=Path.cwd())
     p.add_argument("--json", action="store_true")
 
-    p = sub.add_parser("recommend-packet", help="write full recommendation candidates for model review")
+    p = sub.add_parser("recommend-packet", help="write compact verified candidates for relevance review")
     p.add_argument("error_id")
     p.add_argument("--limit", type=int, default=5)
     p.add_argument("--keyword", action="append")
     p.add_argument("--feature", action="append", choices=tuple(FEATURE_CODES))
     p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--full", action="store_true", help="include answers and solutions only when needed")
     p.add_argument("--project-root", type=Path, default=Path.cwd())
     p.add_argument("--json", action="store_true")
 
@@ -2722,7 +2762,7 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "recommend-packet":
                 payload = recommendation_packet(
                     conn, args.error_id, max(1, min(args.limit, 10)), args.project_root,
-                    args.keyword, args.feature, args.out,
+                    args.keyword, args.feature, args.out, args.full,
                 )
             elif args.command == "assign-recommendations":
                 plan = json.loads(args.plan.read_text(encoding="utf-8"))

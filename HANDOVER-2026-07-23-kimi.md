@@ -3,13 +3,21 @@
 > 本文件接续 `HANDOVER-2026-07-22-kimi.md`；项目规则仍以 `DEEPSEEK_STARTUP.md` / `PROJECT_ARCHITECTURE.md` 为准。
 > 2026-07-22 晚 → 2026-07-23 中午期间的题库验证与录题工作由 Codex 会话完成，非 Kimi 所为，质量未复核。
 
-## 1. 当前快照（bank-info，2026-07-23 13:40 实测）
+## 1. 当前快照（handoff，2026-07-23 14:35 实测）
 
 - canonical_path：`data/math_notebook.db`（唯一主库；`2026-07-18\new-chat-3` 同名副本严禁触碰）
 - schema_version：2；integrity_check：**ok**；foreign_key_violations：**0**
-- 题目：**2425**；已验证：**1353**；未验证：**1072**；来源：157；错题：13
-- 逻辑 SHA-256：`bf7cf5e28ac136fb89c1d156b283d44d21f959c0e0a957ee067c9697f8afc2c2`（本次工作未写库）
+- 题目：**2425**；已验证：**1385**；未验证：**1040**；来源：157；错题：13；到期复习：20
+- 逻辑 SHA-256：`c7aa6fb25c0a19b38bcb86e71392ee6dc43ec0d2e129bed6508acb7958703ac5`
 - 自动化测试：**37/37 通过**（`python -X utf8 -m unittest discover -s tests`）
+- Git：`a80879c`（fix + docs 两个 Kimi 提交），工作区无跟踪文件脏改
+
+## 1.1 Kimi 7-23 下午验证波次（+32 verified，1353→1385）
+
+- **豁免批尾部 18 题全清**（`data/audits/2026-07-23-kimi-exempt-tail/`）：北师大实验阶段测试一 16 + 二中第六学段 1 + 八十中 11 月期中 1。15 corrected / 1 pass（knowledge line-circle→space-vectors 修正 ×6、feature solution→single-choice 修正 ×7、答案全角标点规范化 ×1）+ **2 reject（查重拦截）**：Q-fe90fcfdd3fe、Q-3474fac464e8 分别与已验证 Q-fa3c231ea34d、Q-11c846fb8a1c 同题。其中 Q-bfe9939d35ee（立方体多结论）按完整独立推导复核，答案 ①② 正确。
+- **二中校模全卷收官**（`data/audits/2026-07-23-kimi-bj2-preexam/b02~b05/`）：7-22 导入批次**不豁免**，12 题全部完整独立推导（11 corrected / 1 pass），答案均与库中一致。修正要点：Q-89272c85abf7 题干 OCR 误字“1n2”→$\ln 2$；Q-e8e541b3102d 库中解析 h(0) 系 h(1) 笔误（review_note 注明，未改正文）；多题 knowledge/feature 冗余误标修正。该来源仅剩 Q-46d912b38c4d（codex 今日已 reject 的同题重复）在队列中，属设计如此，**此来源视为完成**。
+- 亮点复核：Q-b267f4ea5127（数列压轴）(1) 枚举验证 4 组解无遗漏、(2) 逼迫链成立；Q-e1b2236e71a0（椭圆）(2) 几何转化 PE⊥PF + 常数方程组复算，P(0,1) 正确；Q-08ce9cf38ab1（翻折多结论）①√5/15≠√5/10、②π/4、③恒约 26.6°、④圆轨迹逐条复核。
+- reviewer 均为 `kimi-2026-07-23`；决策文件含完整独立解答或豁免核查说明。
 
 ## 2. Codex 会话 7-22 晚～7-23 午进展（非 Kimi 工作，仅记录观测）
 
@@ -42,6 +50,6 @@
 
 ## 5. 未完成事项
 
-1. **未验证题 1072 道**：`2026-07-19-g11-beijing-20` 批次内按户主 7-21 豁免标准（核查完整、查重、答案解析自洽）；批次外仍须完整独立推导。Codex 今日两个 current 批次目录（见 §2）可能还有未落库的 review JSON，继续前先盘点 `data/audits/2026-07-23-current-*/*/reviews/` 与库内最新 `verification_reviews` 避免重复。
+1. **未验证题 1052 道**：`2026-07-19-g11-beijing-20` 豁免批**已全部清零**；其余全部须完整独立推导（7-17 老批次 287、7-18 新课标 I 卷 3、7-22 导入批约 760）。Codex 今日两个 current 批次目录 review 已全部落库（47/47），无遗留。已 reject 的题（如 Q-46d912b38c4d、Q-fe90fcfdd3fe、Q-3474fac464e8）仍在未验证队列属设计如此，勿重复审。
 2. **到期复习**：用 `due --json` 拉取、`tmp/review_sheet.py` 生成复习卷。
 3. 环境备忘不变：无 pytest/fitz/poppler；bash 双引号吞 `$`；用户开着 PDF 会 PermissionError（本次用临时文件 `_merged-new.pdf` 再 replace 规避）；PDF 转 PNG 目检可用 `soffice --headless --convert-to png`（仅首页，单页 PDF 正好）。

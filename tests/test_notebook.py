@@ -455,6 +455,54 @@ class NotebookTests(unittest.TestCase):
         self.assertFalse(review["checklist"]["answer_derived"])
         self.assertEqual(before, after)
 
+    def test_simplified_verification_queue_uses_import_date(self):
+        notebook.import_records(
+            self.conn,
+            [
+                {
+                    "stem": "简化通道测试题：求 $1+1$。",
+                    "answer": "$2$",
+                    "solution": "直接计算得 $2$。",
+                    "knowledge_codes": ["algebra-operations"],
+                },
+                {
+                    "stem": "完整通道测试题：求 $2+2$。",
+                    "answer": "$4$",
+                    "solution": "直接计算得 $4$。",
+                    "knowledge_codes": ["algebra-operations"],
+                },
+            ],
+            "验证日期筛选测试", None, "User-Provided-Authorized", False,
+        )
+        rows = self.conn.execute(
+            "SELECT id,stem FROM questions WHERE source_name='验证日期筛选测试'"
+        ).fetchall()
+        ids = {row["stem"].split("：", 1)[0]: row["id"] for row in rows}
+        self.conn.execute(
+            "UPDATE questions SET created_at='2026-07-20T00:00:00+08:00' WHERE id=?",
+            (ids["简化通道测试题"],),
+        )
+        self.conn.execute(
+            "UPDATE questions SET created_at='2026-07-19T23:59:59+08:00' WHERE id=?",
+            (ids["完整通道测试题"],),
+        )
+        self.conn.commit()
+
+        queue = notebook.audit_queue(
+            self.conn, 10, "验证日期筛选测试", simplified_only=True
+        )
+        self.assertEqual([row["id"] for row in queue], [ids["简化通道测试题"]])
+        self.assertEqual(queue[0]["verification_mode"], "simplified")
+        self.assertEqual(
+            notebook.audit_item(
+                self.conn, ids["完整通道测试题"]
+            )["verification_mode"],
+            "full",
+        )
+        summary = notebook.audit_summary(self.conn)
+        self.assertGreaterEqual(summary["simplified_eligible"], 1)
+        self.assertGreaterEqual(summary["full_review_required"], 1)
+
     def test_agent_context_and_handoff_are_compact_read_only_snapshots(self):
         context = notebook.agent_context(
             self.conn, self.db, ROOT, "verify"
@@ -462,8 +510,13 @@ class NotebookTests(unittest.TestCase):
         self.assertEqual(context["task"], "verify")
         self.assertIn("required_reference", context)
         self.assertIn("prepare-audit-batch", " ".join(context["commands"]))
+        self.assertEqual(
+            context["simplified_verification_policy"]["created_from"],
+            "2026-07-20",
+        )
         handoff = notebook.handoff_snapshot(self.conn, self.db, ROOT)
         self.assertIn("unverified_issues", handoff)
+        self.assertIn("simplified_eligible", handoff["verification_workload"])
         self.assertLessEqual(len(handoff["top_pending_sources"]), 5)
         self.assertEqual(handoff["defaults"], {"answers": False, "print": False})
 

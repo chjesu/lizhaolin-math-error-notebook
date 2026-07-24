@@ -73,7 +73,7 @@ flowchart TD
 
 ### 3.2 授权题目导入与逐题验证
 
-`2026-07-19-g11-beijing-20` 是用户确认的可靠来源批次，可免每题完整独立推演；仍须逐题检查完整性、重复项、答案解析自洽、标签与来源，并通过 `audit-item → verify-item`。其他来源继续执行下图中的完整独立推导流程。
+`2026-07-19-g11-beijing-20`，以及自 `2026-07-20`（含）起入库的高质量试卷题，是用户确认的简化验证范围：可免每题完整独立重解，仍须逐题检查完整性、重复项、答案解析自洽、标签与来源，并通过 `audit-item → verify-item`；发现疑点时恢复独立推导。`audit-summary` 给出当前可简化数量，`audit-queue/prepare-audit-batch --simplified-only` 直接筛选。更早的其他来源继续执行下图中的完整独立推导流程。
 
 ```mermaid
 flowchart TD
@@ -151,15 +151,15 @@ flowchart LR
 | 代码查询 | `causes` | 精简查询错因代码 |
 | 代码查询 | `features` | 精简查询题目结构特征代码 |
 | 单题标注 | `annotate` | 修正题干/答案/解析/标签/难度/题型；内部验证质量门 |
-| 审核队列 | `audit-queue` | 精简列出未验证题，可按来源过滤 |
-| 审核包 | `audit-item` | 汇总一题的内容、来源、问题、近重复项和审核要求 |
-| 审核脚手架 | `prepare-audit-batch` | 生成逐题审核包和 verdict=pending 的审核 JSON，不修改数据库 |
+| 审核队列 | `audit-queue` | 精简列出未验证题，可按来源过滤；`--simplified-only` 只列自 2026-07-20 起入库的简化验证题 |
+| 审核包 | `audit-item` | 汇总一题的内容、来源、问题、近重复项、审核要求和 `verification_mode` |
+| 审核脚手架 | `prepare-audit-batch` | 生成逐题审核包和 verdict=pending 的审核 JSON，不修改数据库；支持 `--simplified-only` |
 | 精简审核扩展 | `prepare-review-batch` | 将模型逐题给出的精简决策扩展为完整审核 JSON，不替代数学判断、不写库 |
 | 结构化验证 | `verify-item` | 接受独立审核 JSON；逐题记录并在通过时提升状态 |
 | 批量提交审核 | `verify-review-batch` | 逐项复用 `verify-item` 质量门提交审核文件，只压缩命令输出，不批量放宽验证 |
 | 特征回填 | `backfill-features` | 幂等推断题型结构特征，不改变验证状态 |
 | 选项修复 | `repair-embedded-options` | 从原始记录或题干回填 A-D 结构化选项 |
-| 审核汇总 | `audit-summary` | 按来源统计缺解析、异常公式、占位答案、图形依赖等 |
+| 审核汇总 | `audit-summary` | 按来源统计缺解析、异常公式、占位答案、图形依赖，并返回简化/完整验证题量 |
 | 学习统计 | `stats` | 错题、推荐、正确率、薄弱知识点和错因统计 |
 | 课程覆盖 | `coverage` | 按课程知识点统计已验证题覆盖 |
 
@@ -350,7 +350,7 @@ python -B .agents\skills\math-error-notebook\scripts\notebook.py agent-context -
 - 判题：`photo-preflight（直接使用精简 ocr_pages/question_ids） → question --compact（题号可见时） → 模型按需查看小图 → grade-preview → grade-commit`；不得在常规流程中整包读取 `ocr-packet.json`
 - 推荐：`recommend-packet --limit 3 → 模型只复核精简题干 → assign-recommendations <同一packet>`；仅对个别疑难候选调用 `question <id>`，不再默认加载全部答案与长解析
 - 批量 DOCX：`import_recent_docx_batch.py → audit_recent_docx_batch.py`
-- 验证：`prepare-audit-batch → 模型输出精简决策 → prepare-review-batch → verify-review-batch`
+- 验证：`audit-summary → audit-queue/prepare-audit-batch [--simplified-only] → 模型输出精简决策 → prepare-review-batch → verify-review-batch`
 - 交接：`handoff`
 
 尚未程序化、也不应伪自动化的部分：照片内容理解、第一处实质性错误定位、独立数学推导、答案/解析逻辑判断、推荐题真实相关性复核。模型行为标准案例集仍待建立。

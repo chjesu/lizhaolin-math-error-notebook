@@ -54,7 +54,7 @@ python -B .agents\skills\math-error-notebook\scripts\notebook.py agent-context -
 
 - 推荐只使用 `verified=1`，必须显示来源和理由。
 - 外部 `verified`、来源信誉、抽样和批量 SQL 不能替代逐题审核。
-- `2026-07-19-g11-beijing-20` 仅免完整独立重解，仍须逐题审核并执行 `verify-item`。
+- `2026-07-19-g11-beijing-20` 以及自 `2026-07-20`（含）起入库的高质量试卷题可免完整独立重解，但仍须逐题审核并执行 `verify-item`；使用 `audit-summary` 和 `--simplified-only` 获取权威范围，遇到疑点仍须独立推导。
 - “粗心”必须有学生步骤的直接证据；不清晰内容使用 `unclear`。
 - PDF 默认无答案、不打印；只有用户明确要求才附答案或打印。
 - 仅导入开放授权或用户确认有权使用的材料。

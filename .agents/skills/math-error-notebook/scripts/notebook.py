@@ -81,6 +81,7 @@ DEFAULT_KNOWLEDGE = SKILL_DIR / "assets/knowledge-points.json"
 DEFAULT_SEED = SKILL_DIR / "assets/seed-questions.jsonl"
 DEFAULT_PROJECT_ROOT = DEFAULT_DB.parent.parent
 RELIABLE_BATCH = "2026-07-19-g11-beijing-20"
+SIMPLIFIED_VERIFICATION_FROM = "2026-07-20"
 RECOMMENDATION_BLOCK_PATTERNS = (
     "the introductory phrase should read",
     "matches the stored final answer",
@@ -93,6 +94,14 @@ RECOMMENDATION_BLOCK_PATTERNS = (
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def simplified_verification_eligible(created_at: str | None) -> bool:
+    """Return whether an import date qualifies for the user-approved compact review."""
+    return bool(
+        created_at
+        and str(created_at)[:10] >= SIMPLIFIED_VERIFICATION_FROM
+    )
 
 
 def parse_date(value: str | None) -> date:
@@ -1680,8 +1689,21 @@ def audit_item(
            FROM sources WHERE name=? ORDER BY rights_confirmed DESC,id LIMIT 1""",
         (row["source_name"],),
     ).fetchone()
+    simplified = simplified_verification_eligible(row["created_at"])
+    required_review = [
+        "核对题干、选项和图形条件是否完整",
+        (
+            "核对答案与解析逻辑自洽；发现疑点时必须独立推导"
+            if simplified
+            else "独立推导答案，不采信外部 verified 字段"
+        ),
+        "核对或补全逐步解析",
+        "核对知识点、题型、难度和结构特征",
+        "核对来源授权并处理重复项",
+    ]
     packet = {
         "schema": "math-question-audit-packet/v1",
+        "verification_mode": "simplified" if simplified else "full",
         "question": {
             "id": row["id"],
             "stem": row["stem"],
@@ -1692,6 +1714,7 @@ def audit_item(
             "question_type": row["question_type"],
             "difficulty": row["difficulty"],
             "verified": row["verified"],
+            "created_at": row["created_at"],
             "source_name": row["source_name"],
             "source_url": row["source_url"],
             "license": row["license"],
@@ -1706,13 +1729,7 @@ def audit_item(
             "issues": question_issue_codes(row, len(tags), len(targets)),
             "near_duplicates": near_duplicate_candidates(conn, question_id, row["stem"]),
         },
-        "required_review": [
-            "核对题干、选项和图形条件是否完整",
-            "独立推导答案，不采信外部 verified 字段",
-            "核对或补全逐步解析",
-            "核对知识点、题型、难度和结构特征",
-            "核对来源授权并处理重复项",
-        ],
+        "required_review": required_review,
     }
     canonical = json.dumps(packet, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     packet["packet_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -1996,24 +2013,45 @@ def repair_embedded_options(
 
 
 def audit_queue(
-    conn: sqlite3.Connection, limit: int, source_name: str | None = None, full: bool = False
+    conn: sqlite3.Connection,
+    limit: int,
+    source_name: str | None = None,
+    full: bool = False,
+    simplified_only: bool = False,
 ) -> list[dict[str, Any]]:
     source_clause = " AND q.source_name=?" if source_name else ""
-    params: tuple[Any, ...] = (source_name, limit) if source_name else (limit,)
+    simplified_clause = (
+        " AND substr(q.created_at,1,10)>=?" if simplified_only else ""
+    )
+    params: list[Any] = []
+    if source_name:
+        params.append(source_name)
+    if simplified_only:
+        params.append(SIMPLIFIED_VERIFICATION_FROM)
+    params.append(limit)
     fields = (
         "q.id,q.stem,q.options_json,q.answer,q.solution,q.grade,q.question_type,"
-        "q.difficulty,q.source_name,q.source_url"
+        "q.difficulty,q.source_name,q.source_url,q.created_at"
         if full else
-        "q.id,q.stem,q.answer,q.grade,q.question_type,q.difficulty,q.source_name"
+        "q.id,q.stem,q.answer,q.grade,q.question_type,q.difficulty,q.source_name,q.created_at"
     )
-    return [dict(row) for row in conn.execute(
+    result = [dict(row) for row in conn.execute(
         f"""SELECT {fields},
                   COUNT(qk.knowledge_code) AS tag_count
            FROM questions q LEFT JOIN question_knowledge qk ON qk.question_id=q.id
-           WHERE q.verified=0{source_clause} GROUP BY q.id
+           WHERE q.verified=0{source_clause}{simplified_clause} GROUP BY q.id
            ORDER BY tag_count ASC,q.source_name,q.id LIMIT ?""",
         params,
     )]
+    for item in result:
+        item["verification_mode"] = (
+            "simplified"
+            if simplified_verification_eligible(item["created_at"])
+            else "full"
+        )
+        if not full:
+            item.pop("created_at", None)
+    return result
 
 
 def audit_summary(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -2043,8 +2081,14 @@ def audit_summary(conn: sqlite3.Connection) -> dict[str, Any]:
             if key in present_issues:
                 totals[key] += 1
                 summary[key] += 1
+    simplified_eligible = sum(
+        simplified_verification_eligible(row["created_at"]) for row in rows
+    )
     return {
         "unverified_questions": len(rows),
+        "simplified_eligible": simplified_eligible,
+        "full_review_required": len(rows) - simplified_eligible,
+        "simplified_from": SIMPLIFIED_VERIFICATION_FROM,
         "issues": totals,
         "sources": [
             {"source_name": source, **summary}
@@ -2203,12 +2247,22 @@ def handoff_snapshot(
         "status": health["status"],
         "bank": health["bank"],
         "unverified_issues": nonzero_issues,
+        "verification_workload": {
+            "simplified_eligible": audit["simplified_eligible"],
+            "full_review_required": audit["full_review_required"],
+            "simplified_from": audit["simplified_from"],
+        },
         "top_pending_sources": top_sources,
         "due_reviews": len(review_due(conn, date.today())),
         "git": _git_summary(project_root),
         "warnings": health["warnings"],
         "defaults": {"answers": False, "print": False},
-        "reliable_batch_exception": RELIABLE_BATCH,
+        "simplified_verification_policy": {
+            "legacy_batch": RELIABLE_BATCH,
+            "created_from": SIMPLIFIED_VERIFICATION_FROM,
+            "full_independent_resolve_required": False,
+            "item_level_review_required": True,
+        },
     }
 
 
@@ -2236,6 +2290,9 @@ AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
     },
     "verify": {
         "commands": [
+            "audit-summary --json  # includes simplified_eligible/full_review_required",
+            "audit-queue --simplified-only --limit <n> --json",
+            "prepare-audit-batch --simplified-only --limit <n> --out-dir <dir> --json",
             "prepare-audit-batch --source-name <source> --limit <n> --out-dir <dir> --json",
             "prepare-review-batch <concise-decisions.json> --out-dir <dir> --json",
             "verify-item <question-id> <review.json> --json",
@@ -2294,7 +2351,15 @@ def agent_context(
             "PDF defaults to no answers and no print",
             "mathematical judgment remains model-reviewed; deterministic scripts do not replace it",
         ],
-        "reliable_batch_exception": RELIABLE_BATCH if task == "verify" else None,
+        "simplified_verification_policy": (
+            {
+                "legacy_batch": RELIABLE_BATCH,
+                "created_from": SIMPLIFIED_VERIFICATION_FROM,
+                "full_independent_resolve_required": False,
+                "item_level_review_required": True,
+            }
+            if task == "verify" else None
+        ),
         **task_context,
     }
 
@@ -2306,9 +2371,12 @@ def prepare_audit_batch(
     out_dir: Path,
     reviewer: str,
     force: bool,
+    simplified_only: bool = False,
 ) -> dict[str, Any]:
     """Create packets and safe, unsubmitted review skeletons without changing the DB."""
-    rows = audit_queue(conn, limit, source_name, full=False)
+    rows = audit_queue(
+        conn, limit, source_name, full=False, simplified_only=simplified_only
+    )
     packets_dir = out_dir / "packets"
     reviews_dir = out_dir / "reviews"
     items: list[dict[str, Any]] = []
@@ -2355,6 +2423,7 @@ def prepare_audit_batch(
             "question_id": question_id,
             "packet": str(packet_path.resolve()),
             "review": str(review_path.resolve()),
+            "verification_mode": packet["verification_mode"],
             "issues": summary["issues"],
             "near_duplicates": summary["near_duplicate_count"],
         })
@@ -2638,6 +2707,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("audit-queue", help="list unverified imported questions")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--source-name")
+    p.add_argument(
+        "--simplified-only",
+        action="store_true",
+        help=f"only questions imported on or after {SIMPLIFIED_VERIFICATION_FROM}",
+    )
     p.add_argument("--full", action="store_true", help="include solution and source URL")
     p.add_argument("--json", action="store_true")
 
@@ -2651,6 +2725,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=10)
     p.add_argument("--out-dir", type=Path, required=True)
     p.add_argument("--reviewer", default="codex")
+    p.add_argument(
+        "--simplified-only",
+        action="store_true",
+        help=f"only questions imported on or after {SIMPLIFIED_VERIFICATION_FROM}",
+    )
     p.add_argument("--force", action="store_true", help="overwrite existing pending review files")
     p.add_argument("--json", action="store_true")
 
@@ -2825,14 +2904,18 @@ def main(argv: list[str] | None = None) -> int:
                 payload = annotate_question(conn, args)
             elif args.command == "audit-queue":
                 payload = audit_queue(
-                    conn, max(1, min(args.limit, 500)), args.source_name, args.full
+                    conn,
+                    max(1, min(args.limit, 500)),
+                    args.source_name,
+                    args.full,
+                    args.simplified_only,
                 )
             elif args.command == "audit-item":
                 payload = audit_item(conn, args.question_id, args.out)
             elif args.command == "prepare-audit-batch":
                 payload = prepare_audit_batch(
                     conn, args.source_name, max(1, min(args.limit, 100)), args.out_dir,
-                    args.reviewer, args.force,
+                    args.reviewer, args.force, args.simplified_only,
                 )
             elif args.command == "verify-item":
                 payload = apply_verification_review(conn, args.question_id, args.review)

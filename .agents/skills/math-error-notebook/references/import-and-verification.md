@@ -34,7 +34,7 @@ exceptions without consuming model context.
 python -B <skill-dir>\scripts\notebook.py audit-item <id> --out data/audits/packets/<id>.json --json
 ```
 
-5. Independently verify stem, options, answer, derivation, knowledge tags, difficulty, structural features, source, and duplicates. Copy `assets/question-review-template.json`, fill every required field, and do not copy the stored answer as an “independent” derivation.
+5. Independently verify stem, options, answer, derivation, knowledge tags, difficulty, structural features, source, and duplicates. Copy `assets/question-review-template.json`, fill every required field, and do not copy the stored answer as an “independent” derivation. Exception: the user-confirmed `2026-07-19-g11-beijing-20` batch and high-quality exam questions imported on or after `2026-07-20` may skip a full independent re-solve. They still require item-level completeness, duplicate, answer/solution-consistency, tag, feature, and provenance checks; any doubt or inconsistency must be resolved by independent derivation.
 6. Submit exactly one structured review:
 
 ```powershell
@@ -47,9 +47,23 @@ per-item verifier and does not relax any checklist or mathematical-review rule.
 
 To reduce repeated model output, a reviewed item may first be written in a concise
 decisions file and expanded with `prepare-review-batch`. Each passing item must still
-set `checks_confirmed: true` and provide its independently derived answer, solution,
-answer/solution checks, and any corrected tags. The expander only copies deterministic
-question metadata and creates canonical review files; it never changes the database.
+set `checks_confirmed: true`, fill the answer/solution review fields, record
+answer/solution checks, and provide any corrected tags. Full-mode items use an
+independent answer and derivation. Simplified-mode items may use a concise reviewed
+answer and consistency basis instead of repeating a full re-solve, but must not merely
+copy the stored long solution. The expander only copies deterministic question
+metadata and creates canonical review files; it never changes the database.
+
+The compact date-based route is programmatic:
+
+```powershell
+python -B <skill-dir>\scripts\notebook.py audit-summary --json
+python -B <skill-dir>\scripts\notebook.py audit-queue --simplified-only --limit 20 --json
+python -B <skill-dir>\scripts\notebook.py prepare-audit-batch --simplified-only --limit 20 --out-dir <dir> --json
+```
+
+`audit-item.verification_mode` is `simplified` or `full`. Simplified review reduces
+the amount of repeated derivation, not the number of per-item checks or review records.
 
 `pass` and `corrected` can promote only when every checklist item is true and an independent answer/solution is present. `needs_revision` and `reject` are logged but remain unverified. Internally, promotion uses the same field validation as `annotate --verify`.
 

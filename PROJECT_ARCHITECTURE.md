@@ -126,7 +126,7 @@ flowchart LR
 | 智能体启动 | `doctor` | 一次检查唯一主库、schema、完整性、项目文件、PDF 依赖、LibreOffice 和打印配置 |
 | 智能体启动 | `agent-context` | 按 grade/recommend/verify/import/review/pdf/maintenance 返回最小规则与命令集合 |
 | 智能体交接 | `handoff` | 精简输出主库哈希、验证数量、主要问题、复习任务和 Git 状态 |
-| 照片预检 | `photo-preflight` | RapidOCR 离线方向纠正、文本、缓存、小预览及疑难裁剪；`--formula-ocr auto|off|paddle` 可让隔离的 PaddleGPU 仅处理小裁剪。公式候选不可信任，不写主库，不替代视觉和数学判断 |
+| 照片预检 | `photo-preflight` | RapidOCR 离线方向纠正、文本、缓存、小预览及疑难裁剪；精简返回直接包含 OCR 正文、题号和裁剪选择器，例行判题不得再读取完整 OCR 包；`--formula-ocr auto|off|paddle` 可让隔离的 PaddleGPU 仅处理小裁剪。公式候选不可信任，不写主库，不替代视觉和数学判断 |
 | 初始化 | `init` | 创建 schema、装载知识点；主库存在时不得用来重建数据 |
 | 初始化 | `seed` | 幂等导入项目原创种子题，仅用于首次建库 |
 | 题库身份 | `bank-info` | 主库绝对路径、SHA256、schema、完整性、外键和数量 |
@@ -146,7 +146,7 @@ flowchart LR
 | 复习反馈 | `review` | 记录 correct/partial/wrong，并在失败时启动新周期 |
 | 作答记录 | `attempt` | 保存推荐题对错、答案和新的错因 |
 | 检索 | `search` | 按知识点、年级、难度、文本、验证状态精简检索 |
-| 单题详情 | `question` | 按 ID 读取一个完整题目；`--raw` 才读取原始导入记录 |
+| 单题详情 | `question` | 按 ID 读取题目；照片判题优先用 `--compact` 省略长解析和非必要元数据，确有需要才读完整题目；`--raw` 才读取原始导入记录 |
 | 代码查询 | `knowledge` | 精简查询知识点代码 |
 | 代码查询 | `causes` | 精简查询错因代码 |
 | 代码查询 | `features` | 精简查询题目结构特征代码 |
@@ -347,7 +347,7 @@ python -B .agents\skills\math-error-notebook\scripts\notebook.py agent-context -
 
 固定流程：
 
-- 判题：`photo-preflight → 模型按需查看小图 → grade-preview → grade-commit`
+- 判题：`photo-preflight（直接使用精简 ocr_pages/question_ids） → question --compact（题号可见时） → 模型按需查看小图 → grade-preview → grade-commit`；不得在常规流程中整包读取 `ocr-packet.json`
 - 推荐：`recommend-packet --limit 3 → 模型只复核精简题干 → assign-recommendations <同一packet>`；仅对个别疑难候选调用 `question <id>`，不再默认加载全部答案与长解析
 - 批量 DOCX：`import_recent_docx_batch.py → audit_recent_docx_batch.py`
 - 验证：`prepare-audit-batch → 模型输出精简决策 → prepare-review-batch → verify-review-batch`

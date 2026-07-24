@@ -639,10 +639,36 @@ def _compact_result(
     packet: dict[str, Any], packet_path: Path, cache_hit: bool
 ) -> dict[str, Any]:
     pages = packet.get("pages") or []
+    ocr_pages = [
+        {
+            "page": page.get("page"),
+            "text": page.get("ocr_text", ""),
+            "preview_path": page.get("model_preview_path"),
+            "detail_crops": [
+                {
+                    "path": crop.get("path"),
+                    "reason": crop.get("reason"),
+                    "ocr_text": crop.get("ocr_text", ""),
+                    "confidence": crop.get("confidence"),
+                }
+                for crop in page.get("detail_crops", [])
+            ],
+        }
+        for page in pages
+    ]
+    question_ids = sorted(
+        {
+            match
+            for page in pages
+            for match in re.findall(r"\bQ-[A-Za-z0-9]+\b", page.get("ocr_text", ""))
+        }
+    )
     return {
         "status": "ok",
         "packet": str(packet_path.resolve()),
         "pages": len(pages),
+        "ocr_pages": ocr_pages,
+        "question_ids": question_ids,
         "ocr_characters": packet.get("metrics", {}).get("ocr_characters", 0),
         "detail_crops": packet.get("metrics", {}).get("detail_crops", 0),
         "formula_candidates": packet.get("metrics", {}).get(

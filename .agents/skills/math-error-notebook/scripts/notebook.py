@@ -1383,7 +1383,12 @@ def list_feature_codes(text: str | None = None) -> list[dict[str, str]]:
     ]
 
 
-def question_detail(conn: sqlite3.Connection, question_id: str, raw: bool = False) -> dict[str, Any]:
+def question_detail(
+    conn: sqlite3.Connection,
+    question_id: str,
+    raw: bool = False,
+    compact: bool = False,
+) -> dict[str, Any]:
     row = conn.execute("SELECT * FROM questions WHERE id=?", (question_id,)).fetchone()
     if not row:
         raise ValueError(f"question not found: {question_id}")
@@ -1403,6 +1408,21 @@ def question_detail(conn: sqlite3.Connection, question_id: str, raw: bool = Fals
     )
     if not raw:
         result.pop("raw_json", None)
+    if compact:
+        compact_keys = (
+            "id",
+            "stem",
+            "answer",
+            "options",
+            "question_type",
+            "difficulty",
+            "source_name",
+            "verified",
+            "knowledge_codes",
+            "target_causes",
+            "feature_codes",
+        )
+        result = {key: result.get(key) for key in compact_keys}
     return result
 
 
@@ -2196,6 +2216,7 @@ AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
     "grade": {
         "commands": [
             "photo-preflight <image...> --json",
+            "question <id> --compact --json when the sheet exposes a question ID",
             "causes --text <topic> --json",
             "knowledge --text <topic> --json",
             "features --text <structure> --json",
@@ -2573,9 +2594,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--text")
     p.add_argument("--json", action="store_true")
 
-    p = sub.add_parser("question", help="show one question in full")
+    p = sub.add_parser("question", help="show one question")
     p.add_argument("question_id")
-    p.add_argument("--raw", action="store_true", help="include original raw import JSON")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--raw", action="store_true", help="include original raw import JSON")
+    mode.add_argument(
+        "--compact",
+        action="store_true",
+        help="omit the long solution and nonessential metadata for grading",
+    )
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("knowledge", help="list compact knowledge-point codes")
@@ -2782,7 +2809,12 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "sources":
                 payload = list_sources(conn, args.text)
             elif args.command == "question":
-                payload = question_detail(conn, args.question_id, args.raw)
+                payload = question_detail(
+                    conn,
+                    args.question_id,
+                    raw=args.raw,
+                    compact=args.compact,
+                )
             elif args.command == "knowledge":
                 payload = list_knowledge_points(conn, args.text, args.grade)
             elif args.command == "causes":

@@ -204,6 +204,16 @@ class NotebookTests(unittest.TestCase):
         self.assertNotIn("raw_json", item)
         self.assertIn("knowledge_codes", item)
 
+    def test_question_detail_compact_omits_long_solution(self):
+        row = self.conn.execute("SELECT id FROM questions LIMIT 1").fetchone()
+        item = notebook.question_detail(self.conn, row["id"], compact=True)
+        self.assertIn("answer", item)
+        self.assertIn("stem", item)
+        self.assertIn("knowledge_codes", item)
+        self.assertNotIn("solution", item)
+        self.assertNotIn("raw_json", item)
+        self.assertNotIn("created_at", item)
+
     def test_compact_metadata_lookups(self):
         points = notebook.list_knowledge_points(self.conn, "圆", 11)
         self.assertTrue(any(item["code"] == "line-circle" for item in points))
@@ -917,7 +927,7 @@ class NotebookTests(unittest.TestCase):
                     self.boxes = [[[20, 40], [260, 40], [260, 80], [20, 80]]]
                 else:
                     self.boxes = [[[20, 40], [60, 40], [60, 280], [20, 280]]]
-                self.txts = ("x+1=2",)
+                self.txts = ("Q-local123 x+1=2",)
                 self.scores = (0.93,)
 
         class FakeEngine:
@@ -937,6 +947,10 @@ class NotebookTests(unittest.TestCase):
         self.assertFalse(result["cache_hit"])
         self.assertEqual(result["pages"], 1)
         self.assertGreaterEqual(result["detail_crops"], 1)
+        self.assertEqual(result["question_ids"], ["Q-local123"])
+        self.assertIn("x+1=2", result["ocr_pages"][0]["text"])
+        self.assertNotIn("lines", result["ocr_pages"][0])
+        self.assertNotIn("formula_ocr", result["ocr_pages"][0])
         packet = json.loads(Path(result["packet"]).read_text(encoding="utf-8"))
         self.assertIn(packet["pages"][0]["rotation_degrees_ccw"], (90, 270))
         self.assertIn("x+1=2", packet["pages"][0]["ocr_text"])

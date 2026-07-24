@@ -25,6 +25,11 @@ python -B <skill-dir>\scripts\notebook.py photo-preflight <image...> --json
 `photo-preflight` defaults to `--formula-ocr auto`: RapidOCR handles orientation,
 printed text, previews, and detail crops; when the isolated project-local Paddle
 runtime is installed, only those small crops receive GPU formula recognition.
+Its compact command result already contains `ocr_pages`, detected `question_ids`,
+preview paths, and crop selectors. Use that result directly; do not read the full
+`ocr-packet.json` during routine grading. When a printed question ID is available,
+load only `question <id> --compact --json`; request the full item only if its
+solution is genuinely needed.
 Use `--formula-ocr off` for RapidOCR-only operation or `--formula-ocr paddle` to
 require the formula stage. Read `formula_ocr` as an untrusted LaTeX locator.
 Never accept its Chinese text or mathematical notation without checking the

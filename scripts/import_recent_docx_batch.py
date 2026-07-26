@@ -48,7 +48,8 @@ def infer_grade(name: str) -> int:
         return 10
     if "高二" in name:
         return 11
-    if "高三" in name or re.search(r"202\d届", name):
+    national_exam = re.search(r"(?:新课标)?全国[ⅠⅡⅢ一二三甲乙12]*卷.*数学.*真题", name)
+    if "高三" in name or "高考" in name or national_exam or re.search(r"202\d届", name):
         return 12
     raise ValueError("cannot infer grade")
 
@@ -63,6 +64,9 @@ def infer_year(name: str) -> str:
     if match:
         return f"{match.group(1)}-{match.group(2)}"
     match = re.search(r"(20\d{2})届", name)
+    if match:
+        return match.group(1)
+    match = re.search(r"(20\d{2})年", name)
     return match.group(1) if match else "2025-2026"
 
 

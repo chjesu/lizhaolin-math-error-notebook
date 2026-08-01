@@ -145,6 +145,7 @@ flowchart LR
 | 复习到期 | `due` | 查询到期或逾期复习任务 |
 | 复习反馈 | `review` | 记录 correct/partial/wrong，并在失败时启动新周期 |
 | 作答记录 | `attempt` | 保存推荐题对错、答案和新的错因 |
+| 作答更正 | `correct-attempt` | 原位更正误判的 attempt，并同步推荐状态；不重复计数 |
 | 检索 | `search` | 按知识点、年级、难度、文本、验证状态精简检索 |
 | 单题详情 | `question` | 按 ID 读取题目；照片判题优先用 `--compact` 省略长解析和非必要元数据，确有需要才读完整题目；`--raw` 才读取原始导入记录 |
 | 代码查询 | `knowledge` | 精简查询知识点代码 |
@@ -372,4 +373,50 @@ python -B -m unittest discover -s tests -v
 python -B .agents\skills\math-error-notebook\scripts\notebook.py handoff --json
 ```
 
+### Rejected-question removal
+
+Use `notebook.py delete-rejected-questions <question-id...>` for a read-only
+preview and add `--confirm` only after checking the exact targets. The command
+refuses verified questions, questions whose latest review is not `reject`, and
+questions referenced by errors, recommendations, or attempts. Deletion runs
+through the canonical database transaction and cascades only question-owned
+tags, features, targets, and verification reviews.
+
+### Attempted-question exclusion
+
+`recommend` and `recommend-packet` exclude every question that already has an
+`attempts` record. This is a hard filter, not a ranking penalty, so completed
+practice cannot reappear in later recommendation PDFs.
+
+### Grading response standard
+
+Photo and typed-work grading uses one shared response contract. Each question is
+graded separately. Wrong or partially correct work must include the complete
+original question, the student's submitted work, the first substantive error,
+a complete corrected solution, and the final answer. Distinct applicable
+methods are listed separately. Unreadable stems, symbols, conditions, or
+diagrams are reported as unclear rather than reconstructed. Fully correct work
+needs only a concise verdict and key verification.
+
 题库写入后必须报告具体 ID、数量变化、完整性和外键结果。不得只凭对话声明完成。
+
+### Token-saving symbolic precheck
+
+`scripts/symbolic_precheck.py` is a read-only computation aid for expressions
+that an agent has already formalized. It has no database access and must not be
+used to infer a question from Chinese text, OCR, handwriting, or a diagram.
+Input packets contain only identity, equation, or substitution checks. Default
+output omits every passing item and contains only aggregate counts plus
+`fail`/`unknown` items with short evidence. Use `--full` only for debugging.
+
+Install the pinned optional dependency into the ignored `.runtime/math`
+directory on first use:
+
+```powershell
+python -B scripts\symbolic_precheck.py <checks.json> --install
+```
+
+A passing precheck confirms only the submitted formal expression. It never
+promotes a question, replaces `audit-item → verify-item`, or removes the
+required review of stem, diagrams, assumptions, cases, tags, provenance, and
+duplicates.

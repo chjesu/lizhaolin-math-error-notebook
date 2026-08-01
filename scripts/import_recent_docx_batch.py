@@ -13,6 +13,7 @@ import json
 import re
 import subprocess
 import sys
+import zipfile
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -78,6 +79,26 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def docx_content_sha256(path: Path) -> str:
+    """Hash question-bearing DOCX content while ignoring package metadata."""
+    digest = hashlib.sha256()
+    with zipfile.ZipFile(path) as archive:
+        members = [
+            name
+            for name in archive.namelist()
+            if name == "word/document.xml" or name.startswith("word/media/")
+        ]
+        if "word/document.xml" not in members:
+            raise ValueError(f"DOCX has no word/document.xml: {path}")
+        for name in sorted(members):
+            payload = archive.read(name)
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(len(payload).to_bytes(8, "big"))
+            digest.update(payload)
+    return digest.hexdigest()
+
+
 def recent_docx(directory: Path, start: date, end: date) -> list[Path]:
     return sorted(
         (
@@ -111,7 +132,7 @@ def main() -> int:
         for row in existing_rows
         if isinstance(row, dict)
     }
-    seen_hashes: dict[str, str] = {}
+    seen_content_hashes: dict[str, str] = {}
     records: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
     total_inserted = 0
@@ -120,17 +141,23 @@ def main() -> int:
     for index, path in enumerate(recent_docx(args.directory, args.from_date, args.to_date), 1):
         name = source_name(path)
         file_hash = sha256(path)
+        content_hash = docx_content_sha256(path)
         entry: dict[str, Any] = {
             "file": str(path.resolve()),
             "source_name": name,
             "sha256": file_hash,
+            "content_sha256": content_hash,
             "modified_date": datetime.fromtimestamp(path.stat().st_mtime).date().isoformat(),
         }
-        if file_hash in seen_hashes:
-            entry.update(status="skipped_duplicate_file", duplicate_of=seen_hashes[file_hash])
+        if content_hash in seen_content_hashes:
+            entry.update(
+                status="skipped_duplicate_file",
+                duplicate_kind="docx_content",
+                duplicate_of=seen_content_hashes[content_hash],
+            )
             records.append(entry)
             continue
-        seen_hashes[file_hash] = str(path.resolve())
+        seen_content_hashes[content_hash] = str(path.resolve())
         if existing.get(name, 0) > 0:
             entry.update(status="skipped_existing_source", existing_questions=existing[name])
             records.append(entry)

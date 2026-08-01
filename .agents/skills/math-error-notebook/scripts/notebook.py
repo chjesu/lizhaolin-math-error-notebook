@@ -937,6 +937,109 @@ def delete_error(conn: sqlite3.Connection, error_id: str, project_root: Path) ->
     return {"error_id": error_id, "deleted": True, "removed_files": removed_files}
 
 
+def delete_rejected_questions(
+    conn: sqlite3.Connection,
+    question_ids: list[str],
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Remove only unverified questions whose latest recorded review is reject."""
+    ordered_ids = list(dict.fromkeys(question_ids))
+    if not ordered_ids:
+        raise ValueError("at least one question_id is required")
+    if len(ordered_ids) != len(question_ids):
+        raise ValueError("duplicate question_id")
+
+    placeholders = ",".join("?" for _ in ordered_ids)
+    rows = {
+        row["id"]: row
+        for row in conn.execute(
+            f"SELECT id, verified FROM questions WHERE id IN ({placeholders})",
+            ordered_ids,
+        )
+    }
+    missing = [question_id for question_id in ordered_ids if question_id not in rows]
+    if missing:
+        raise ValueError("question not found: " + ", ".join(missing))
+
+    eligible: list[dict[str, Any]] = []
+    blockers: list[dict[str, Any]] = []
+    for question_id in ordered_ids:
+        latest = conn.execute(
+            """SELECT verdict, reviewer, created_at
+               FROM verification_reviews
+               WHERE question_id=?
+               ORDER BY created_at DESC, rowid DESC
+               LIMIT 1""",
+            (question_id,),
+        ).fetchone()
+        references = {
+            "errors": conn.execute(
+                "SELECT COUNT(*) FROM errors WHERE question_id=?", (question_id,)
+            ).fetchone()[0],
+            "recommendations": conn.execute(
+                "SELECT COUNT(*) FROM recommendations WHERE question_id=?", (question_id,)
+            ).fetchone()[0],
+            "attempts": conn.execute(
+                "SELECT COUNT(*) FROM attempts WHERE question_id=?", (question_id,)
+            ).fetchone()[0],
+        }
+        reasons: list[str] = []
+        if rows[question_id]["verified"]:
+            reasons.append("question is verified")
+        if not latest or latest["verdict"] != "reject":
+            reasons.append("latest review is not reject")
+        if any(references.values()):
+            reasons.append("question has learner-data references")
+        item = {
+            "question_id": question_id,
+            "latest_verdict": latest["verdict"] if latest else None,
+            "latest_reviewer": latest["reviewer"] if latest else None,
+            "latest_reviewed_at": latest["created_at"] if latest else None,
+            "references": references,
+        }
+        if reasons:
+            item["reasons"] = reasons
+            blockers.append(item)
+        else:
+            eligible.append(item)
+
+    if blockers:
+        raise ValueError(
+            "cannot delete requested questions: "
+            + json.dumps(blockers, ensure_ascii=False, separators=(",", ":"))
+        )
+
+    review_count = conn.execute(
+        f"SELECT COUNT(*) FROM verification_reviews WHERE question_id IN ({placeholders})",
+        ordered_ids,
+    ).fetchone()[0]
+    before_count = conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
+    payload = {
+        "requested": len(ordered_ids),
+        "eligible": len(eligible),
+        "question_ids": ordered_ids,
+        "verification_reviews": review_count,
+        "before_questions": before_count,
+        "after_questions": before_count,
+        "database_modified": False,
+    }
+    if not confirm:
+        return payload
+
+    with conn:
+        conn.execute(
+            f"DELETE FROM questions WHERE id IN ({placeholders})",
+            ordered_ids,
+        )
+    after_count = conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
+    payload.update({
+        "deleted": before_count - after_count,
+        "after_questions": after_count,
+        "database_modified": True,
+    })
+    return payload
+
+
 def compact_recommendations(items: list[dict[str, Any]], full: bool) -> list[dict[str, Any]]:
     if full:
         return items
@@ -1057,14 +1160,16 @@ def recommend(
     rows = list(conn.execute(
         f"""SELECT q.*,
                COUNT(DISTINCT qk.knowledge_code) AS overlap,
-               MAX(CASE WHEN qt.cause_code=? THEN 1 ELSE 0 END) AS cause_match,
-               COALESCE((SELECT AVG(a.is_correct) FROM attempts a WHERE a.question_id=q.id), -1) AS accuracy
+               MAX(CASE WHEN qt.cause_code=? THEN 1 ELSE 0 END) AS cause_match
             FROM questions q
             JOIN question_knowledge qk ON qk.question_id=q.id
             LEFT JOIN question_targets qt ON qt.question_id=q.id
             WHERE qk.knowledge_code IN ({placeholders})
               AND q.verified=1
               AND (q.id <> COALESCE(?, ''))
+              AND NOT EXISTS (
+                  SELECT 1 FROM attempts a WHERE a.question_id=q.id
+              )
               AND q.id NOT IN (SELECT question_id FROM recommendations WHERE error_id=?)
             GROUP BY q.id""",
         (error["cause_code"], *codes, error["question_id"], error_id),
@@ -1079,7 +1184,6 @@ def recommend(
         target = max(1.0, min(5.0, float(error["difficulty"]) + desired_offsets[(rank - 1) % len(desired_offsets)]))
         def score(row: sqlite3.Row) -> float:
             difficulty_score = max(0.0, 3.0 - abs(float(row["difficulty"]) - target))
-            repeat_penalty = 0.5 if row["accuracy"] == 1 else 0.0
             stem = (row["stem"] or "").casefold()
             keyword_score = 2.0 * sum(keyword in stem for keyword in keywords)
             candidate_features = set(question_feature_codes(
@@ -1089,7 +1193,7 @@ def recommend(
             return (
                 5.0 * row["overlap"] + 2.5 * row["cause_match"]
                 + difficulty_score + row["verified"] + keyword_score
-                + feature_score - repeat_penalty
+                + feature_score
             )
         best = max(remaining, key=score)
         remaining.remove(best)
@@ -1278,6 +1382,45 @@ def record_attempt(conn: sqlite3.Connection, args: argparse.Namespace) -> str:
     )
     conn.commit()
     return attempt_id
+
+
+def correct_attempt(conn: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    row = conn.execute(
+        """SELECT id,question_id,error_id,submitted_answer,is_correct,cause_code,note
+           FROM attempts WHERE id=?""",
+        (args.attempt_id,),
+    ).fetchone()
+    if not row:
+        raise ValueError(f"attempt not found: {args.attempt_id}")
+    if args.cause_code and args.cause_code not in CAUSE_CODES:
+        raise ValueError(f"unsupported cause_code: {args.cause_code}")
+
+    is_correct = int(args.correct)
+    submitted_answer = args.answer if args.answer is not None else row["submitted_answer"]
+    cause_code = None if is_correct else (args.cause_code or row["cause_code"])
+    correction_note = f"Correction {now_iso()}: {args.note or 'grading result corrected'}"
+    note = "\n".join(part for part in (row["note"], correction_note) if part)
+    conn.execute(
+        """UPDATE attempts
+           SET submitted_answer=?,is_correct=?,cause_code=?,note=?
+           WHERE id=?""",
+        (submitted_answer, is_correct, cause_code, note, args.attempt_id),
+    )
+    if row["error_id"]:
+        conn.execute(
+            "UPDATE recommendations SET status=? WHERE error_id=? AND question_id=?",
+            ("correct" if is_correct else "wrong", row["error_id"], row["question_id"]),
+        )
+    conn.commit()
+    return {
+        "attempt_id": args.attempt_id,
+        "question_id": row["question_id"],
+        "error_id": row["error_id"],
+        "previous_result": "correct" if row["is_correct"] else "wrong",
+        "result": "correct" if is_correct else "wrong",
+        "submitted_answer": submitted_answer,
+        "database_modified": True,
+    }
 
 
 def stats(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -1631,7 +1774,7 @@ def question_issue_codes(
         issues.append("broken_marker")
     if re.search(r"证明见解析|答案见解析|需根据|轨迹方程见解析", row["answer"] or ""):
         issues.append("placeholder_answer")
-    if re.search(r"如图|图中|下图|直方图", row["stem"] or ""):
+    if re.search(r"如图|图中|下图|直方图|!\[[^\]]*\]\(", text):
         issues.append("diagram_reference")
     return issues
 
@@ -1767,6 +1910,13 @@ def apply_verification_review(
     review_id = slug_id("VR")
 
     if verdict in {"needs_revision", "reject"}:
+        # A later audit can invalidate an item that was previously promoted.
+        # The workflow contract requires non-passing verdicts to leave the
+        # question unverified, not merely append an adverse review record.
+        conn.execute(
+            "UPDATE questions SET verified=0 WHERE id=?",
+            (question_id,),
+        )
         conn.execute(
             """INSERT INTO verification_reviews
                (id,question_id,verdict,reviewer,review_sha256,review_json,created_at)
@@ -2597,6 +2747,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--project-root", type=Path, default=Path.cwd())
     p.add_argument("--json", action="store_true")
 
+    p = sub.add_parser(
+        "delete-rejected-questions",
+        help="remove unverified questions whose latest recorded review is reject",
+    )
+    p.add_argument("question_ids", nargs="+")
+    p.add_argument(
+        "--confirm",
+        action="store_true",
+        help="perform the deletion; without this flag the command is read-only",
+    )
+    p.add_argument("--json", action="store_true")
+
     p = sub.add_parser("recommend", help="recommend verified questions for an error")
     p.add_argument("error_id")
     p.add_argument("--limit", type=int, default=5)
@@ -2640,6 +2802,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("attempt", help="record a practice attempt")
     p.add_argument("question_id")
     p.add_argument("--error-id")
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument("--correct", action="store_true")
+    group.add_argument("--wrong", action="store_true")
+    p.add_argument("--answer")
+    p.add_argument("--cause-code", choices=tuple(CAUSE_CODES))
+    p.add_argument("--note")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("correct-attempt", help="correct a previously misgraded practice attempt")
+    p.add_argument("attempt_id")
     group = p.add_mutually_exclusive_group(required=True)
     group.add_argument("--correct", action="store_true")
     group.add_argument("--wrong", action="store_true")
@@ -2860,6 +3032,10 @@ def main(argv: list[str] | None = None) -> int:
                 }
             elif args.command == "delete-error":
                 payload = delete_error(conn, args.error_id, args.project_root)
+            elif args.command == "delete-rejected-questions":
+                payload = delete_rejected_questions(
+                    conn, args.question_ids, args.confirm
+                )
             elif args.command == "recommend":
                 payload = recommend(
                     conn, args.error_id, max(1, min(args.limit, 10)), args.save,
@@ -2883,6 +3059,9 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "attempt":
                 args.correct = not args.wrong
                 payload = {"attempt_id": record_attempt(conn, args)}
+            elif args.command == "correct-attempt":
+                args.correct = not args.wrong
+                payload = correct_attempt(conn, args)
             elif args.command == "search":
                 payload = search_questions(conn, args)
             elif args.command == "sources":

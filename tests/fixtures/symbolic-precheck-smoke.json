@@ -1,0 +1,26 @@
+{
+  "checks": [
+    {
+      "id": "equation",
+      "kind": "equation",
+      "equation": "x**2-4",
+      "variable": "x",
+      "expected": ["-2", "2"]
+    },
+    {
+      "id": "identity",
+      "kind": "identity",
+      "variables": ["x"],
+      "left": "sin(x)**2+cos(x)**2",
+      "right": "1"
+    },
+    {
+      "id": "substitution",
+      "kind": "substitution",
+      "variables": ["x"],
+      "expression": "x**2+1",
+      "values": {"x": "3"},
+      "expected": "10"
+    }
+  ]
+}

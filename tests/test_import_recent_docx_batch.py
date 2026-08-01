@@ -1,5 +1,7 @@
 import importlib.util
+import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 
@@ -11,6 +13,23 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ImportRecentDocxBatchInferenceTests(unittest.TestCase):
+    def test_docx_content_hash_ignores_package_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = root / "first.docx"
+            second = root / "second.docx"
+            for path, metadata in ((first, b"created-first"), (second, b"created-second")):
+                with zipfile.ZipFile(path, "w") as archive:
+                    archive.writestr("word/document.xml", b"<document>same paper</document>")
+                    archive.writestr("word/media/image1.png", b"same image")
+                    archive.writestr("docProps/core.xml", metadata)
+
+            self.assertNotEqual(MODULE.sha256(first), MODULE.sha256(second))
+            self.assertEqual(
+                MODULE.docx_content_sha256(first),
+                MODULE.docx_content_sha256(second),
+            )
+
     def test_infer_grade_from_gaokao_name(self):
         self.assertEqual(MODULE.infer_grade("2026年高考北京卷数学真题"), 12)
         self.assertEqual(MODULE.infer_grade("2026年上海春季高考数学试卷"), 12)

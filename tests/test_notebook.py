@@ -107,6 +107,91 @@ class NotebookTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "careless requires direct evidence"):
             notebook.validate_error_analysis(self.conn, analysis)
 
+    def test_embedded_image_marker_requires_visual_review(self):
+        row = {
+            "stem": "完成作答。![题图](data/images/graph.png)",
+            "answer": "1",
+            "solution": "由函数性质可得。",
+            "question_type": "解答题",
+            "options_json": None,
+        }
+        self.assertIn("diagram_reference", notebook.question_issue_codes(row, 1, 1))
+        row["stem"] = "完成作答。"
+        row["answer"] = "![答案图](data/images/answer.png)"
+        self.assertIn("diagram_reference", notebook.question_issue_codes(row, 1, 1))
+
+    def test_delete_rejected_questions_requires_reject_and_confirmation(self):
+        source_name = "Delete test source"
+        record = {
+            "id": "Q-rejected-delete-test",
+            "stem": "Test rejected question",
+            "answer": "1",
+            "solution": "Test solution",
+            "grade": 10,
+            "question_type": "solution",
+            "difficulty": 2,
+            "knowledge_codes": ["sets"],
+        }
+        question_id = notebook.normalize_question(
+            record, source_name, None, "Project-Original", False
+        )["id"]
+        notebook.import_records(
+            self.conn,
+            [record],
+            source_name,
+            None,
+            "Project-Original",
+            False,
+        )
+        with self.assertRaisesRegex(ValueError, "latest review is not reject"):
+            notebook.delete_rejected_questions(self.conn, [question_id], False)
+
+        self.conn.execute(
+            """INSERT INTO verification_reviews(
+               id,question_id,verdict,reviewer,review_sha256,review_json,created_at
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                "VR-delete-test",
+                question_id,
+                "reject",
+                "test",
+                "sha",
+                "{}",
+                "2026-07-26T18:00:00+08:00",
+            ),
+        )
+        self.conn.commit()
+
+        preview = notebook.delete_rejected_questions(
+            self.conn, [question_id], False
+        )
+        self.assertFalse(preview["database_modified"])
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM questions WHERE id=?", (question_id,)
+            ).fetchone()[0],
+            1,
+        )
+
+        result = notebook.delete_rejected_questions(
+            self.conn, [question_id], True
+        )
+        self.assertTrue(result["database_modified"])
+        self.assertEqual(result["deleted"], 1)
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM questions WHERE id=?", (question_id,)
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM verification_reviews WHERE question_id=?",
+                (question_id,),
+            ).fetchone()[0],
+            0,
+        )
+
     def test_recommendation_preview_is_compact_and_read_only(self):
         error_id = self.create_error()
         items = notebook.recommend(self.conn, error_id, 3, False, self.root)
@@ -117,6 +202,80 @@ class NotebookTests(unittest.TestCase):
             "SELECT COUNT(*) FROM recommendations WHERE error_id=?", (error_id,)
         ).fetchone()[0]
         self.assertEqual(count, 0)
+
+    def test_recommendation_excludes_attempted_questions(self):
+        error_id = self.create_error()
+        first = notebook.recommend(self.conn, error_id, 1, False, self.root)[0]
+        attempted_id = first["question_id"]
+        self.conn.execute(
+            """INSERT INTO attempts(
+                   id,question_id,error_id,submitted_answer,is_correct,
+                   cause_code,attempted_at,note
+               ) VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                "ATT-recommendation-exclusion",
+                attempted_id,
+                error_id,
+                None,
+                1,
+                None,
+                notebook.now_iso(),
+                "test attempted-question exclusion",
+            ),
+        )
+        self.conn.commit()
+
+        items = notebook.recommend(self.conn, error_id, 10, False, self.root)
+        self.assertNotIn(attempted_id, [item["question_id"] for item in items])
+
+    def test_correct_attempt_updates_existing_row_without_duplication(self):
+        error_id = self.create_error()
+        question_id = notebook.recommend(self.conn, error_id, 1, False, self.root)[0]["question_id"]
+        self.conn.execute(
+            """INSERT INTO attempts(
+                   id,question_id,error_id,submitted_answer,is_correct,
+                   cause_code,attempted_at,note
+               ) VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                "ATT-misgraded",
+                question_id,
+                error_id,
+                "sqrt(14)",
+                0,
+                "calculation",
+                notebook.now_iso(),
+                "initial grading",
+            ),
+        )
+        self.conn.commit()
+        args = Namespace(
+            attempt_id="ATT-misgraded",
+            correct=True,
+            wrong=False,
+            answer="sqrt(5)",
+            cause_code=None,
+            note="visual recheck",
+        )
+
+        result = notebook.correct_attempt(self.conn, args)
+
+        self.assertEqual(result["previous_result"], "wrong")
+        self.assertEqual(result["result"], "correct")
+        row = self.conn.execute(
+            """SELECT submitted_answer,is_correct,cause_code,note
+               FROM attempts WHERE id=?""",
+            ("ATT-misgraded",),
+        ).fetchone()
+        self.assertEqual(row["submitted_answer"], "sqrt(5)")
+        self.assertEqual(row["is_correct"], 1)
+        self.assertIsNone(row["cause_code"])
+        self.assertIn("visual recheck", row["note"])
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM attempts WHERE id=?", ("ATT-misgraded",)
+            ).fetchone()[0],
+            1,
+        )
 
     def test_recommendation_packet_is_compact_reusable_and_read_only(self):
         error_id = self.create_error()
@@ -591,6 +750,9 @@ class NotebookTests(unittest.TestCase):
         ids = {row["stem"]: row["id"] for row in rows}
         pass_id = ids["求 $f(x)=x^2$ 的导数。"]
         revise_id = ids["占位审核题。"]
+        # A later adverse review must revoke an earlier verified state.
+        self.conn.execute("UPDATE questions SET verified=1 WHERE id=?", (revise_id,))
+        self.conn.commit()
         pass_review = {
             "question_id": pass_id,
             "verdict": "pass",
@@ -639,6 +801,10 @@ class NotebookTests(unittest.TestCase):
         self.assertEqual(result["verified"], 1)
         self.assertEqual(result["needs_revision"], 1)
         self.assertEqual(result["failed"], 0)
+        revise_verified = self.conn.execute(
+            "SELECT verified FROM questions WHERE id=?", (revise_id,)
+        ).fetchone()[0]
+        self.assertEqual(revise_verified, 0)
 
     def test_prepare_review_batch_expands_concise_decision_without_writing_db(self):
         row = self.conn.execute("SELECT id,grade FROM questions LIMIT 1").fetchone()

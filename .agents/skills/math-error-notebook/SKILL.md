@@ -54,6 +54,14 @@ python -B <skill-dir>\scripts\notebook.py grade-commit <analysis.json> --copy-im
 
 6. Lead with the first wrong step, cause, correct method, prevention cue, and saved error ID. Read `references/error-taxonomy.md` only when cause selection is ambiguous; read `references/data-contract.md` only if the template or validation fails.
 
+### Grading response standard
+
+- Grade every visible question separately.
+- If an answer is wrong or partially correct, show the complete original question, the student's answer, the first substantive error, a complete correct derivation, and the final answer.
+- When two or more genuinely different applicable methods exist, list them separately; do not present cosmetic algebra rearrangements as different methods.
+- If the original stem, symbol, condition, or diagram is unclear, do not reconstruct it silently. State what is unreadable and request a clearer crop.
+- For a fully correct answer, a concise verdict plus the key verification is sufficient.
+
 ## Recommend and print
 
 Preview compact, same-type verified matches with 1-3 discriminative keywords; save only after relevance review:
@@ -65,6 +73,7 @@ python -B <skill-dir>\scripts\notebook.py assign-recommendations <error-id> <pac
 ```
 
 - Default output and recommendation packets hide answers/solutions. Ranking, keyword tokenization, obvious placeholder rejection, difficulty progression, knowledge, cause, attempt history, and audited structural features run locally. Review the compact packet for relevance, then pass that same packet to `assign-recommendations`; do not create a second plan file. Use `question <id> --json` only for an ambiguous shortlisted item, or `recommend-packet --full` only when complete solutions are genuinely needed.
+- Questions with any recorded practice attempt are excluded from recommendation candidates.
 - If automatic matches are weak, save a reviewed verified set with `assign-recommendations`; never substitute invented questions silently.
 - If fewer than three verified matches exist, report the shortfall and offer adjacent-topic search or generated questions labeled unverified.
 - After saving, create the A4 PDF (questions only by default; add `--with-answers` when the user wants an answer page) and print only when the user asks:
@@ -76,6 +85,8 @@ python -B <skill-dir>\scripts\practice_sheet.py <error-id> --print
 Printer/output preferences live in `config/math-error-notebook.json`. The script emits only a compact artifact summary.
 
 After grading practice, record it with `attempt <question-id> --error-id <error-id> --correct|--wrong`; include `--cause-code` when wrong, then adapt recommendations.
+If a previously recorded attempt was misgraded, correct that same row with
+`correct-attempt <attempt-id> --correct|--wrong`; do not add a second attempt.
 
 ## Import and verify
 

@@ -120,6 +120,16 @@ class NotebookTests(unittest.TestCase):
         row["answer"] = "![答案图](data/images/answer.png)"
         self.assertIn("diagram_reference", notebook.question_issue_codes(row, 1, 1))
 
+    def test_image_only_choice_options_require_visual_review(self):
+        row = {
+            "stem": "下列图像中符合条件的是（　　）",
+            "answer": "A",
+            "solution": "由图像性质可知选 A。",
+            "question_type": "单选题",
+            "options_json": '["![A](data/images/a.png)", "B", "C", "D"]',
+        }
+        self.assertIn("diagram_reference", notebook.question_issue_codes(row, 1, 1))
+
     def test_delete_rejected_questions_requires_reject_and_confirmation(self):
         source_name = "Delete test source"
         record = {

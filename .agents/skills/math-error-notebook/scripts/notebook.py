@@ -1758,7 +1758,10 @@ def annotate_question(
 def question_issue_codes(
     row: sqlite3.Row | dict[str, Any], tag_count: int, target_count: int
 ) -> list[str]:
-    text = "\n".join(str(row[key] or "") for key in ("stem", "answer", "solution"))
+    text = "\n".join(
+        str(row[key] or "")
+        for key in ("stem", "options_json", "answer", "solution")
+    )
     issues: list[str] = []
     if not bool((row["solution"] or "").strip()):
         issues.append("missing_solution")

@@ -64,6 +64,25 @@ class SegmentationTests(unittest.TestCase):
         self.assertEqual([item["number"] for item in segments], [1, 2])
         self.assertEqual(diagnostics["duplicate_question_numbers"], [])
 
+    def test_fullwidth_question_dot_before_year_is_not_a_decimal(self):
+        segments, diagnostics = MODULE.analyze_segments(
+            self.records("4．上一题", "5．2021年发生的事件", "6．下一题")
+        )
+
+        self.assertEqual([item["number"] for item in segments], [4, 5, 6])
+        self.assertEqual(diagnostics["missing_question_numbers"], [1, 2, 3])
+
+    def test_numbered_tips_do_not_create_duplicate_question_segments(self):
+        segments, diagnostics = MODULE.analyze_segments(
+            self.records(
+                "20．压轴题", "【点睛】方法如下：", "1、构造函数", "2、分类讨论",
+                "3、检查端点", "21．下一题",
+            )
+        )
+
+        self.assertEqual([item["number"] for item in segments], [20, 21])
+        self.assertEqual(diagnostics["duplicate_question_numbers"], [])
+
     def test_declared_section_total_exposes_a_truncated_tail(self):
         segments, diagnostics = MODULE.analyze_segments(
             self.records("一、选择题：本题共3小题", "1．第一题", "2．第二题")
@@ -102,6 +121,32 @@ class QuestionParsingTests(unittest.TestCase):
         self.assertNotIn("【答案】", question["solution"])
         self.assertTrue(question["stem"].startswith("已知"))
         self.assertEqual(len(question["options"]), 4)
+
+    def test_solution_table_labels_are_preserved_for_non_choice_question(self):
+        lines = [
+            "18．根据岗位表回答问题。", "A", "269", "B", "40", "C", "177", "D", "44",
+            "（Ⅰ）求录用概率。", "【答案】$1/2$", "【解析】用总录用人数除以总人数。",
+        ]
+
+        question = MODULE.parse_question(
+            18, "三、解答题", lines, "batch", "batch", 12, 2, "2025"
+        )
+
+        self.assertNotIn("options", question)
+        self.assertIn("D\n44", question["stem"])
+        self.assertIn("（Ⅰ）", question["stem"])
+
+    def test_blank_choice_answer_is_recovered_from_explicit_solution_conclusion(self):
+        lines = [
+            "5．根据条件求近似值（ ）", "A．87 B．88 C．89 D．90", "【答案】",
+            "【解析】计算得到结果约为89，故选：C。",
+        ]
+
+        question = MODULE.parse_question(
+            5, "一、选择题", lines, "batch", "batch", 11, 2, "2025"
+        )
+
+        self.assertEqual(question["answer"], "C")
 
     def test_answer_images_are_localized_too(self):
         lines = [

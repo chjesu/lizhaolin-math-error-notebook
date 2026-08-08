@@ -15,7 +15,7 @@ from docx_parsing import clean_latex, split_options
 
 
 QUESTION_START_RE = re.compile(
-    r"^\s*(?:第\s*)?(\d{1,2})\s*(?:[．.](?!\d)|、|题(?:\s*[:：])?)"
+    r"^\s*(?:第\s*)?(\d{1,2})\s*(?:．|\.(?!\d)|、|题(?:\s*[:：])?)"
 )
 SECTION_RE = re.compile(r"^[一二三四五六七八九十]+、")
 SECTION_COUNT_RE = re.compile(r"(?:本题)?共\s*(\d{1,2})\s*(?:小题|题)")
@@ -117,6 +117,7 @@ def analyze_segments(
     """Split questions and retain enough provenance to detect silent losses."""
     starts: list[tuple[int, int, str]] = []
     section = ""
+    in_numbered_tip_block = False
     declared_section_counts: list[int] = []
     for position, record in enumerate(records):
         text = str(record["text"]).strip()
@@ -125,9 +126,26 @@ def analyze_segments(
             count_match = SECTION_COUNT_RE.search(text)
             if count_match:
                 declared_section_counts.append(int(count_match.group(1)))
+        if text.startswith("【点睛】"):
+            in_numbered_tip_block = True
         match = QUESTION_START_RE.match(text)
         if match:
-            starts.append((position, int(match.group(1)), section))
+            number = int(match.group(1))
+            if re.fullmatch(r"\d{1,2}．\d+(?:\.\d+)?", text):
+                continue
+            # Numbered method tips such as “1、… 2、… 3、…” often appear
+            # after a question's 点睛 paragraph. Within the same section,
+            # real exam question numbers advance monotonically; ignore only
+            # non-increasing lookalikes and still accept the next real number.
+            if (
+                in_numbered_tip_block
+                and starts
+                and number <= starts[-1][1]
+                and section == starts[-1][2]
+            ):
+                continue
+            starts.append((position, number, section))
+            in_numbered_tip_block = False
 
     segments: list[dict[str, object]] = []
     for index, (start, number, current_section) in enumerate(starts):
@@ -215,7 +233,10 @@ def parse_question(
         ),
         solution_start,
     )
-    options, stem_lines = split_options(lines[:answer_index])
+    if "选择" in section or "选题" in section:
+        options, stem_lines = split_options(lines[:answer_index])
+    else:
+        options, stem_lines = [], list(lines[:answer_index])
     if not stem_lines:
         raise ValueError("empty stem after option splitting")
     stem_lines[0] = QUESTION_START_RE.sub("", stem_lines[0], count=1).strip()
@@ -235,6 +256,10 @@ def parse_question(
     solution = localize_images(clean_latex("\n".join(line for line in solution_lines if line)), batch_name, relative_dir)
     if len(stem) < 8:
         raise ValueError("stem too short")
+    if not answer and ("选择" in section or "选题" in section):
+        explicit_choices = re.findall(r"故选\s*[:：]\s*([A-D])", solution)
+        if explicit_choices:
+            answer = explicit_choices[-1]
     if not answer:
         raise ValueError("answer is empty")
     if len(solution) < 8:

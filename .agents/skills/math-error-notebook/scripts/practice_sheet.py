@@ -131,6 +131,52 @@ def load_items(
     return error, rows, knowledge_names
 
 
+def load_daily_packet(
+    db_path: Path, packet_path: Path
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[str], str]:
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    if packet.get("schema") != "math-daily-review-packet/v1":
+        raise ValueError("unsupported daily review packet")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows: list[dict[str, Any]] = []
+    knowledge: list[str] = []
+    error_summaries: list[str] = []
+    for item in packet.get("items") or []:
+        question = item.get("question") or {}
+        question_id = question.get("question_id")
+        if not question_id:
+            continue
+        row = conn.execute(
+            """SELECT id AS question_id,stem,options_json,answer,solution,
+                      difficulty,source_name,verified
+               FROM questions WHERE id=?""",
+            (question_id,),
+        ).fetchone()
+        if not row or not row["verified"]:
+            continue
+        rank = len(rows) + 1
+        error_summaries.append(f"{rank}. {item['problem_text']}")
+        for name in item.get("knowledge") or []:
+            if name not in knowledge:
+                knowledge.append(name)
+        record = dict(row)
+        record.update({
+            "rank": rank,
+            "reason": question.get("reason") or f"到期复习：{item['error_id']}",
+            "stem": f"错题回顾：{item['problem_text']}\n\n同类练习：{row['stem']}",
+        })
+        rows.append(record)
+    conn.close()
+    if not rows:
+        raise ValueError("daily packet contains no reviewed verified recommendations")
+    synthetic_error = {
+        "problem_text": "今日到期复习共 " + str(len(rows)) + " 项。每项先回忆原错因，再独立完成同类题。",
+        "cause_code": None,
+    }
+    return synthetic_error, rows, knowledge, str(packet.get("date") or "daily")
+
+
 def _cause_name(cause_code: str | None) -> str:
     """Resolve a cause code to its display name, reusing notebook.py's taxonomy."""
     if not cause_code:
@@ -730,7 +776,8 @@ def create_pdf(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate a compact A4 practice PDF")
-    parser.add_argument("error_id")
+    parser.add_argument("error_id", nargs="?")
+    parser.add_argument("--daily-packet", type=Path)
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--output", type=Path)
@@ -743,20 +790,28 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="生成的 PDF 附答案页（默认不附答案：孩子做完后拍照判题）",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if bool(args.error_id) == bool(args.daily_packet):
+        parser.error("provide exactly one error_id or --daily-packet")
+    return args
 
 
 def main() -> int:
     args = parse_args()
     ensure_pdf_runtime()
     config = load_config(args.config)
-    output = args.output or (PROJECT_ROOT / "output" / "pdf" / f"{args.error_id}-practice.pdf")
-    error, items, knowledge_names = load_items(args.db, args.error_id)
+    if args.daily_packet:
+        error, items, knowledge_names, packet_date = load_daily_packet(args.db, args.daily_packet)
+        document_id = f"daily-review-{packet_date}"
+    else:
+        error, items, knowledge_names = load_items(args.db, args.error_id)
+        document_id = args.error_id
+    output = args.output or (PROJECT_ROOT / "output" / "pdf" / f"{document_id}-practice.pdf")
     # 默认不附答案页（孩子做完后拍照判题）；--with-answers 或配置项可显式打开。
     include_answers = bool(args.with_answers or config.get("answers_after_questions", False))
     project_name = str(config.get("project_name") or DEFAULT_PROJECT_NAME).strip()
     create_pdf(
-        output, args.error_id, error, items, max(300, args.solution_chars),
+        output, document_id, error, items, max(300, args.solution_chars),
         include_answers=include_answers,
         knowledge_names=knowledge_names,
         project_name=project_name,
@@ -767,7 +822,7 @@ def main() -> int:
             # PDF 附答案页时，打印只打题目页：生成临时纯题目版送打印机后删除。
             questions_only = output.with_name(output.stem + "-questions-only.pdf")
             create_pdf(
-                questions_only, args.error_id, error, items, max(300, args.solution_chars),
+                questions_only, document_id, error, items, max(300, args.solution_chars),
                 include_answers=False,
                 knowledge_names=knowledge_names,
                 project_name=project_name,

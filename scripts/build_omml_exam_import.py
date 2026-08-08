@@ -11,7 +11,7 @@ import json
 import re
 from pathlib import Path
 
-from build_dongzhimen_review import clean_latex, split_options
+from docx_parsing import clean_latex, split_options
 
 
 QUESTION_START_RE = re.compile(

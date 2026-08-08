@@ -7,14 +7,14 @@
 - 正式项目名称：`李兆霖数学错题本`
 - 唯一活动题库：`data/math_notebook.db`
 - 数据库 schema：`2`
-- 题目：`1383`；已验证：`1075`；未验证：`308`
-- 来源：`104`；错题记录：`8`
+- 题目：`7766`；已验证：`7766`；未验证：`0`
+- 错题记录：`25`；到期复习阶段：`110`
 - 主执行器：`.agents/skills/math-error-notebook/scripts/notebook.py`
 - 组卷与打印：`.agents/skills/math-error-notebook/scripts/practice_sheet.py`
 - 照片 OCR 预检：`notebook.py photo-preflight`（RapidOCR 主流程位于 `photo_ocr.py`；隔离的 PaddleGPU 公式识别位于 `paddle_formula_worker.py`）
 - 默认打印机：`EPSON72097C (L3250 Series)`
 
-数量是 2026-07-22 的交接快照；实际状态以 `bank-info --json` 为准。
+数量是 2026-08-08 的实施前快照；实际状态以 `bank-info --json` 为准。
 
 ## 2. 总体架构
 
@@ -69,6 +69,8 @@ flowchart TD
     PDF --> AT["学生作答"]
     AT --> ATT["attempt"]
     ATT --> DUE["due / review：自适应复习周期"]
+    DUE --> DP["daily-review-packet：每个错题仅保留一个当日任务"]
+    DP --> PS
 ```
 
 ### 3.2 授权题目导入与逐题验证
@@ -128,6 +130,8 @@ flowchart LR
 | 智能体启动 | `doctor` | 一次检查唯一主库、schema、完整性、项目文件、PDF 依赖、LibreOffice 和打印配置 |
 | 智能体启动 | `agent-context` | 按 grade/recommend/verify/import/review/pdf/maintenance 返回最小规则与命令集合 |
 | 智能体交接 | `handoff` | 精简输出主库哈希、验证数量、主要问题、复习任务和 Git 状态 |
+| 行为标准 | `behavior-cases` | 按任务列出跨模型标准案例；只在需要时加载单个完整案例 |
+| 可恢复流程 | `workflow-start` / `workflow-update` / `workflow-status` | 在 `data/workflows/` 保存步骤、产物和断点，不重复已完成阶段 |
 | 照片预检 | `photo-preflight` | RapidOCR 离线方向纠正、文本、缓存、小预览及疑难裁剪；精简返回直接包含 OCR 正文、题号和裁剪选择器，例行判题不得再读取完整 OCR 包；`--formula-ocr auto|off|paddle` 可让隔离的 PaddleGPU 仅处理小裁剪。公式候选不可信任，不写主库，不替代视觉和数学判断 |
 | 初始化 | `init` | 创建 schema、装载知识点；主库存在时不得用来重建数据 |
 | 初始化 | `seed` | 幂等导入项目原创种子题，仅用于首次建库 |
@@ -145,10 +149,12 @@ flowchart LR
 | 推荐审核包 | `recommend-packet` | 本地完成关键词拆分、占位题过滤和排序，默认写入不含答案/长解析的精简审核包；同一审核包复核后可直接交给 `assign-recommendations` |
 | 人工推荐 | `assign-recommendations` | 用模型逐题复核后的已验证题替换自动候选 |
 | 复习到期 | `due` | 查询到期或逾期复习任务 |
+| 每日复习包 | `daily-review-packet` | 每个活动错题合并为一个任务，只带已复核且已验证的推荐题 |
 | 复习反馈 | `review` | 记录 correct/partial/wrong，并在失败时启动新周期 |
 | 作答记录 | `attempt` | 保存推荐题对错、答案和新的错因 |
 | 作答更正 | `correct-attempt` | 原位更正误判的 attempt，并同步推荐状态；不重复计数 |
-| 检索 | `search` | 按知识点、年级、难度、文本、验证状态精简检索 |
+| 检索 | `search` | 按知识点、年级、难度、文本、验证状态精简检索；适合的文本查询自动使用主库内 FTS5 |
+| 检索维护 | `rebuild-search-index` | 先备份唯一主库，再在同一 SQLite 内重建 FTS5 trigram 索引与同步触发器 |
 | 单题详情 | `question` | 按 ID 读取题目；照片判题优先用 `--compact` 省略长解析和非必要元数据，确有需要才读完整题目；`--raw` 才读取原始导入记录 |
 | 代码查询 | `knowledge` | 精简查询知识点代码 |
 | 代码查询 | `causes` | 精简查询错因代码 |
@@ -173,11 +179,11 @@ flowchart LR
 - 数据库与标识：`default_database_path`、`connect`、`init_database`、`fingerprint`、`slug_id`、`bank_info`
 - 题目标准化：`infer_knowledge`、`infer_question_features`、`validate_feature_codes`、`normalize_difficulty`、`normalize_question`、`insert_question`
 - 导入与来源：`import_records`、`read_json_records`、`fetch_json`、`register_exam_directory`、`sync_source_manifest`、`update_source_metadata`、`list_sources`
-- 错题与复习：`create_review_cycle`、`render_error_markdown`、`validate_error_analysis`、`record_error`、`fetch_error`、`delete_error`、`review_due`、`mark_review`、`record_attempt`
+- 错题与复习：`create_review_cycle`、`render_error_markdown`、`validate_error_analysis`、`record_error`、`fetch_error`、`delete_error`、`review_due`、`daily_review_packet`、`mark_review`、`record_attempt`
 - 推荐：`compact_recommendations`、`question_feature_codes`、`backfill_question_features`、`error_feature_codes`、`recommend`、`recommendation_packet`、`assign_recommendations`
-- 检索与统计：`stats`、`coverage`、`list_knowledge_points`、`list_cause_codes`、`list_feature_codes`、`question_detail`、`search_questions`
+- 检索与统计：`stats`、`coverage`、`list_knowledge_points`、`list_cause_codes`、`list_feature_codes`、`question_detail`、`search_questions`、`search_index_status`、`rebuild_search_index`
 - 审核与修复：`annotate_question`、`question_issue_codes`、`near_duplicate_candidates`、`audit_item`、`prepare_audit_batch`、`prepare_verification_reviews`、`apply_verification_review`、`apply_verification_review_batch`、`repair_embedded_options`、`audit_queue`、`audit_summary`
-- 启动与交接：`doctor`、`agent_context`、`handoff_snapshot`、`_git_summary`
+- 启动与交接：`doctor`、`agent_context`、`handoff_snapshot`、`behavior_cases`、`workflow_start/update/status`、`_git_summary`
 - 照片 OCR 辅助：`photo_ocr.py` 中的 `process_photos`、`choose_orientation`、`save_detail_crops`、`run_paddle_formula_ocr`；`paddle_formula_worker.py` 在独立进程中加载 GPU 模型，避免与轻量 OCR 的 NumPy/OpenCV 依赖冲突；两者都只生成判题输入包
 
 ### OCR 运行时
@@ -195,6 +201,7 @@ flowchart LR
 
 ```powershell
 python -B .agents\skills\math-error-notebook\scripts\practice_sheet.py <error-id>
+python -B .agents\skills\math-error-notebook\scripts\practice_sheet.py --daily-packet <packet.json>
 ```
 
 已有能力：读取错题及已保存推荐、默认生成无答案练习卷、按需增加答案页、中文字体处理、A4 分页、解析压缩、输出 PDF，并在用户明确要求时通过 LibreOffice/系统打印接口发送到配置的打印机。数学公式支持 `$...$`、`$$...$$`、`\\(...\\)` 与 `\\[...\\]`，通过项目级 `requirements-pdf.txt` 固定依赖并安装到忽略版本控制的 `runtime/pdf`；题图会自动裁除近白边、按 DPI 计算物理尺寸、限制在 110×65 mm 内且不放大小图。
@@ -208,6 +215,7 @@ python -B .agents\skills\math-error-notebook\scripts\practice_sheet.py <error-id
 | 脚本 | 类型 | 作用 | 新任务使用规则 |
 |---|---|---|---|
 | `scripts/extract_docx_omml.py` | 通用、只读提取 | 直接读取 OOXML，将微软 OMML 公式转为 LaTeX，导出段落 JSON/Markdown/媒体 | DOCX 精确公式提取首选 |
+| `scripts/docx_parsing.py` | 通用解析库 | 清理 OMML 转换后的 LaTeX，并拆分混合格式选项且保留同行题干 | 由通用构建器和历史专项脚本共同复用，禁止再从专项脚本导入通用能力 |
 | `scripts/build_omml_exam_import.py` | 通用批次转换 | 兼容常见题号/选项标记，分题并保留原段落范围，配对答案/真实解析，输出未验证 JSONL 与缺题、重号、解析失败等质量报告 | 与上一脚本配套；质量门通过后才可导入，导入后仍逐题验证 |
 | `scripts/import_recent_docx_batch.py` | 日期批次编排 | 去重后调用 OMML 提取与构建，并在 `import-file` 前检查题号连续性、解析失败、字段完整性和选项结构 | 任一异常标记 `blocked_quality_gate` 并停止该卷入库；不得绕过 |
 | `scripts/audit_recent_docx_batch.py` | 入库后结构审核 | 构建逐题审核包，检查字段、标签、来源和题干/答案/解析/选项中的全部图片引用 | 图形依赖题必须转视觉复核，不得直接走纯文本简化通过 |
@@ -231,6 +239,7 @@ python -B .agents\skills\math-error-notebook\scripts\practice_sheet.py <error-id
 | `agents/openai.yaml` | Skill 显示名、默认提示和隐式触发配置 | Codex 发现 Skill 时使用 |
 | `assets/error-analysis-template.json` | 错题结构化保存模板 | 照片/文字批改 |
 | `assets/question-review-template.json` | 单题独立验证模板 | `audit-item` 后、`verify-item` 前 |
+| `assets/model-behavior-cases.json` | 跨模型判题、审核、推荐边界案例 | 新接入模型按任务列出，疑难时只读取单例 |
 | `assets/knowledge-points.json` | 高中数学知识点代码表 | 初始化和代码查询 |
 | `assets/seed-questions.jsonl` | 项目原创已验证种子题 | 仅首次建库 |
 | `references/error-taxonomy.md` | 错因定义和判定边界 | 错因不明确时按需读 |
@@ -291,7 +300,7 @@ erDiagram
     }
 ```
 
-数据库共有 13 张业务/元数据表：`metadata`、`sources`、`knowledge_points`、`questions`、`question_knowledge`、`question_targets`、`question_features`、`verification_reviews`、`errors`、`error_knowledge`、`review_schedule`、`recommendations`、`attempts`。
+数据库共有 13 张业务/元数据表：`metadata`、`sources`、`knowledge_points`、`questions`、`question_knowledge`、`question_targets`、`question_features`、`verification_reviews`、`errors`、`error_knowledge`、`review_schedule`、`recommendations`、`attempts`。此外可在同一主库内建立 `questions_fts` 及其 FTS5 内部表和同步触发器；这些是可重建检索索引，不是第二套题库。
 
 ## 10. 文件与目录所有权
 
@@ -314,7 +323,8 @@ math-error-notebook/
 │  ├─ imports/                       试卷提取与批次中间物
 │  ├─ audits/                        审核包、审核结果和历史审计
 │  ├─ images/                        错题原图副本
-│  └─ backups/                       受控数据库备份，不是活动库
+│  ├─ backups/                       受控数据库备份，不是活动库
+│  └─ workflows/                     可恢复任务清单（步骤、产物、断点）
 ├─ errors/YYYY-MM/                   可读错题报告
 ├─ practice/                         推荐练习 Markdown
 ├─ output/pdf/                       A4打印版 PDF
@@ -357,11 +367,13 @@ PowerShell 读取项目文本必须显式使用 `Get-Content -Encoding UTF8`，P
 
 - 判题：`photo-preflight（直接使用精简 ocr_pages/question_ids） → question --compact（题号可见时） → 模型按需查看小图 → grade-preview → grade-commit`；不得在常规流程中整包读取 `ocr-packet.json`
 - 推荐：`recommend-packet --limit 3 → 模型只复核精简题干 → assign-recommendations <同一packet>`；仅对个别疑难候选调用 `question <id>`，不再默认加载全部答案与长解析
+- 每日复习：`daily-review-packet → 补齐缺少的已复核推荐 → practice_sheet.py --daily-packet`；积压阶段不再重复变成多份任务
 - 批量 DOCX：`import_recent_docx_batch.py → audit_recent_docx_batch.py`
 - 验证：`audit-summary → audit-queue/prepare-audit-batch [--simplified-only] → 模型输出精简决策 → prepare-review-batch → verify-review-batch`
+- 长任务：`workflow-start → workflow-update → workflow-status`，断线或更换模型后从未完成步骤继续
 - 交接：`handoff`
 
-尚未程序化、也不应伪自动化的部分：照片内容理解、第一处实质性错误定位、独立数学推导、答案/解析逻辑判断、推荐题真实相关性复核。模型行为标准案例集仍待建立。
+尚未程序化、也不应伪自动化的部分：照片内容理解、第一处实质性错误定位、独立数学推导、答案/解析逻辑判断、推荐题真实相关性复核。跨模型边界由 `behavior-cases` 提供标准案例，但案例不会替代这些判断。
 
 如用户要求实现这些能力，应优先扩展 `notebook.py`、模板和测试，而不是创建平行系统。
 

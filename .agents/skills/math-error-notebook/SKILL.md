@@ -12,6 +12,8 @@ description: Manage a Chinese high-school math error notebook backed by one loca
 - Use image input directly for photos; never claim to switch models/providers.
 - Run deterministic work through `scripts/notebook.py`. Its project installation binds to the sole bank `data/math_notebook.db`; never discover, merge, copy over, or select another same-named DB.
 - Do not recursively enumerate `data/audits/`, `data/imports/`, or the question corpus. Use compact CLI queries.
+- For multi-step work, start a recoverable manifest with `workflow-start --kind grade|import|verify|recommend|pdf`; update each artifact with `workflow-update`, and resume from `workflow-status` instead of repeating completed stages.
+- Use `behavior-cases --category grade|verify|recommend --json` to align a newly connected model with the project's grading and recommendation boundaries; load one full case with `--id` only when needed.
 - `--json` is compact by default. Use global `--pretty-json` only for human inspection. `search`, `recommend`, and `audit-queue` omit long solutions/raw records unless `--full` is explicit.
 - Before imports or maintenance, run `bank-info --json`. Run `init` then idempotent `seed` only when the canonical bank does not exist.
 
@@ -95,7 +97,11 @@ Read `references/import-and-verification.md` only for question import, source re
 
 ## Review and progress
 
-Use `due --json`, `review <error-id> --result correct|partial|wrong`, `stats --json`, and `coverage --json`. Wrong/partial review starts an adaptive cycle.
+Use `daily-review-packet --limit 12 --out <packet.json> --json` to collapse accumulated schedules into one task per active error. Only saved, reviewed, verified recommendations enter its printable section; resolve any reported recommendation gaps before PDF generation. Generate one questions-only review PDF with `practice_sheet.py --daily-packet <packet.json>`. Use `due --json`, `review <error-id> --result correct|partial|wrong`, `stats --json`, and `coverage --json`. Wrong/partial review starts an adaptive cycle.
+
+## Local full-text retrieval
+
+`search` automatically uses the canonical database's SQLite FTS5 trigram index for suitable text queries and falls back to `LIKE` when unavailable or too short. `recommend` may use the same index only as a small ranking feature after the verified/knowledge/cause/attempt filters. Rebuild it with `rebuild-search-index --json`; the command creates a timestamped database backup first. Do not add a separate vector database unless measured retrieval failures remain after FTS5 and feature-based ranking.
 
 ## Invariants
 

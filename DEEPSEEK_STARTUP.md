@@ -47,10 +47,13 @@ python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py agent-c
 推荐：recommend-packet → 模型复核相关性 → assign-recommendations → practice_sheet.py
 批量 DOCX：import_recent_docx_batch.py → audit_recent_docx_batch.py
 验证：prepare-audit-batch → 模型逐题输出精简决策 → prepare-review-batch → verify-review-batch
+每日复习：daily-review-packet → 补齐缺少的已复核推荐 → practice_sheet.py --daily-packet
+可恢复任务：workflow-start → workflow-update → workflow-status
 交接：handoff --json
 ```
 
 脚本负责格式校验、事务、检索、去重提示、审核脚手架、PDF 和状态汇总；模型仍负责图像理解、第一处实质性错误、数学推导、答案/解析审核和推荐相关性判断。
+新接入模型先按任务调用 `behavior-cases --category grade|verify|recommend --json`；只在需要时读取单个完整案例，避免反复加载长规则。
 
 ## 5. 不变量
 

@@ -11,6 +11,8 @@ import json
 import re
 from pathlib import Path
 
+from docx_parsing import clean_latex, split_options
+
 
 ROOT = Path(__file__).resolve().parents[1]
 IMPORT_DIR = ROOT / "data" / "imports" / "2026-07-18-dongzhimen"
@@ -153,91 +155,6 @@ REVIEW_NOTES = {
     20: "$1/|x|$ 为偶函数且在 $(0,\\infty)$ 上递减；其余选项至少一项性质不满足。",
     21: "换成以 $m$ 为底的对数得 $-\\log_m2-\\log_m3=2$，故 $m^{-2}=6$，解得 $m=\\sqrt6/6$。",
 }
-
-
-def clean_math_segment(value: str) -> str:
-    replacements = {
-        "//": r"\parallel ", "⊥": r"\perp ", "≤": r"\le ", "≥": r"\ge ",
-        "≠": r"\ne ", "∞": r"\infty ", "∈": r"\in ", "∉": r"\notin ",
-        "∀": r"\forall ", "∃": r"\exists ", "∪": r"\cup ", "∩": r"\cap ",
-        "⊆": r"\subseteq ", "⊂": r"\subset ", "π": r"\pi ", "θ": r"\theta ",
-        "⊄": r"\not\subset ",
-        "ξ": r"\xi ", "Ω": r"\Omega ", "Γ": r"\Gamma ", "×": r"\times ",
-        "⋅": r"\cdot ", "−": "-",
-    }
-    for old, new in replacements.items():
-        value = value.replace(old, new)
-    value = value.replace("^{'}", "^{\\prime}")
-    value = re.sub(r"([A-Za-z]+)\^\{\\to\s*\}", r"\\vec{\1}", value)
-    for name in ("sin", "cos", "tan", "ln", "lg", "log", "min", "max"):
-        value = re.sub(rf"(?<![A-Za-z\\]){name}", rf"\\{name} ", value)
-    value = value.replace("N^{*}", r"\mathbb{N}^{*}")
-    return re.sub(r"[ \t]+", " ", value).strip()
-
-
-def clean_latex(value: str) -> str:
-    parts = value.split("$")
-    for index in range(1, len(parts), 2):
-        parts[index] = clean_math_segment(parts[index])
-    value = "$".join(parts)
-    value = value.replace(r"\right$", r"\right.$")
-    value = value.replace(
-        r"\left\{ \left( x,y\right)\left| \right|x-a∣\le 1,\left| y-b\right|\le 1\right\}",
-        r"\{(x,y)\mid |x-a|\le 1,\ |y-b|\le 1\}",
-    )
-    value = value.replace("（    ）", "（ ）").replace("（     ）", "（ ）").replace("（   ）", "（ ）")
-    return value.strip()
-
-
-OPTION_MARKER_RE = re.compile(
-    r"(?<![A-Za-z0-9])(?:[（(]\s*([A-D])\s*[）)]|([A-D])\s*[．.、])"
-)
-
-
-def _option_label(match: re.Match[str]) -> str:
-    return match.group(1) or match.group(2)
-
-
-def split_options(lines: list[str]) -> tuple[list[str], list[str]]:
-    """Split A-D choices without discarding a stem prefix on the same line.
-
-    Downloaded exam DOCX files use several label styles (``A．``, ``A.``,
-    ``A、`` and ``（A）``).  The old implementation removed an entire paragraph
-    as soon as it contained one label, which silently truncated stems formatted
-    as ``question ... A. ... B. ...``.
-    """
-    labels: list[str] = []
-    for line in lines:
-        matches = list(OPTION_MARKER_RE.finditer(line))
-        if matches:
-            labels.extend(_option_label(match) for match in matches)
-
-    # Avoid treating an isolated geometric point such as "A．" as a choice.
-    # A valid choice block must begin with A and include at least B.
-    if not labels or labels[0] != "A" or "B" not in labels:
-        return [], list(lines)
-
-    option_chunks: list[str] = []
-    remaining: list[str] = []
-    for line in lines:
-        matches = list(OPTION_MARKER_RE.finditer(line))
-        if not matches:
-            remaining.append(line)
-            continue
-        prefix = line[: matches[0].start()].strip()
-        if prefix:
-            remaining.append(prefix)
-        option_chunks.append(line[matches[0].start() :].strip())
-
-    option_text = " ".join(option_chunks)
-    matches = list(OPTION_MARKER_RE.finditer(option_text))
-    options: list[str] = []
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(option_text)
-        options.append(
-            _option_label(match) + "．" + option_text[match.end() : end].strip()
-        )
-    return options, remaining
 
 
 def segment_questions(records: list[dict[str, object]]) -> dict[int, list[str]]:

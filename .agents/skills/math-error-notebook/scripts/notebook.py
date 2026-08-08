@@ -79,6 +79,7 @@ def default_database_path() -> Path:
 DEFAULT_DB = default_database_path()
 DEFAULT_KNOWLEDGE = SKILL_DIR / "assets/knowledge-points.json"
 DEFAULT_SEED = SKILL_DIR / "assets/seed-questions.jsonl"
+DEFAULT_BEHAVIOR_CASES = SKILL_DIR / "assets/model-behavior-cases.json"
 DEFAULT_PROJECT_ROOT = DEFAULT_DB.parent.parent
 RELIABLE_BATCH = "2026-07-19-g11-beijing-20"
 SIMPLIFIED_VERIFICATION_FROM = "2026-07-20"
@@ -90,6 +91,14 @@ RECOMMENDATION_BLOCK_PATTERNS = (
     "答案待补",
     "待补充题干",
 )
+WORKFLOW_STEPS: dict[str, tuple[str, ...]] = {
+    "grade": ("photo_preflight", "model_review", "grade_preview", "grade_commit", "recommend"),
+    "import": ("extract", "quality_gate", "import", "audit_prepare", "model_review", "verify"),
+    "verify": ("audit_prepare", "model_review", "review_expand", "verify"),
+    "recommend": ("candidate_packet", "model_review", "assign", "pdf"),
+    "pdf": ("build", "print_optional"),
+}
+WORKFLOW_STATUSES = {"pending", "in_progress", "complete", "blocked"}
 
 
 def now_iso() -> str:
@@ -1153,6 +1162,7 @@ def recommend(
     if not codes:
         raise ValueError("error has no knowledge codes; tag it before requesting recommendations")
     keywords = normalize_recommendation_keywords(keywords)
+    text_ranks = fts_candidate_ranks(conn, keywords)
     target_features = error_feature_codes(error, features)
     if save and replace:
         conn.execute("DELETE FROM recommendations WHERE error_id=?", (error_id,))
@@ -1190,10 +1200,11 @@ def recommend(
                 conn, row["id"], row["stem"], row["question_type"]
             ))
             feature_score = 3.0 * len(candidate_features.intersection(target_features))
+            text_score = max(0.0, 2.0 - 0.01 * text_ranks.get(row["id"], 200)) if row["id"] in text_ranks else 0.0
             return (
                 5.0 * row["overlap"] + 2.5 * row["cause_match"]
                 + difficulty_score + row["verified"] + keyword_score
-                + feature_score
+                + feature_score + text_score
             )
         best = max(remaining, key=score)
         remaining.remove(best)
@@ -1207,6 +1218,8 @@ def recommend(
         matched_keywords = [keyword for keyword in keywords if keyword in (best["stem"] or "").casefold()]
         if matched_keywords:
             reason_parts.append(f"题型关键词：{', '.join(matched_keywords)}")
+        if best["id"] in text_ranks:
+            reason_parts.append("全文检索：题干语义片段匹配")
         matched_features = sorted(set(question_feature_codes(
             conn, best["id"], best["stem"], best["question_type"]
         )).intersection(target_features))
@@ -1331,6 +1344,210 @@ def review_due(conn: sqlite3.Connection, target: date) -> list[dict[str, Any]]:
            ORDER BY rs.due_date, e.id""",
         (target.isoformat(),),
     )]
+
+
+def daily_review_packet(
+    conn: sqlite3.Connection,
+    target: date,
+    limit: int,
+    out_path: Path,
+) -> dict[str, Any]:
+    """Build one compact, deduplicated review task per active error.
+
+    Only already saved, verified recommendations are placed into the printable
+    part of the packet. Missing recommendations are reported for model review
+    instead of silently accepting unreviewed automatic candidates.
+    """
+    rows = conn.execute(
+        """SELECT e.id AS error_id, e.problem_text, e.cause_code, e.difficulty,
+                  MIN(rs.due_date) AS earliest_due, COUNT(*) AS due_stages,
+                  (SELECT rs2.id FROM review_schedule rs2
+                   WHERE rs2.error_id=e.id AND rs2.completed_at IS NULL
+                     AND rs2.due_date<=?
+                   ORDER BY rs2.due_date,rs2.cycle,rs2.stage LIMIT 1) AS review_id
+           FROM review_schedule rs
+           JOIN errors e ON e.id=rs.error_id
+           WHERE rs.completed_at IS NULL AND rs.due_date<=? AND e.status='active'
+           GROUP BY e.id
+           ORDER BY earliest_due, e.difficulty DESC, e.id""",
+        (target.isoformat(), target.isoformat()),
+    ).fetchall()
+    items: list[dict[str, Any]] = []
+    missing_recommendations: list[str] = []
+    for row in rows:
+        overdue_days = max(0, (target - date.fromisoformat(row["earliest_due"])).days)
+        recommendation = conn.execute(
+            """SELECT r.rank,r.reason,q.id AS question_id,q.stem,q.options_json,
+                      q.difficulty,q.source_name
+               FROM recommendations r
+               JOIN questions q ON q.id=r.question_id
+               WHERE r.error_id=? AND q.verified=1
+                 AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.question_id=q.id)
+               ORDER BY CASE WHEN r.status='assigned' THEN 0 ELSE 1 END,r.rank,q.id
+               LIMIT 1""",
+            (row["error_id"],),
+        ).fetchone()
+        knowledge = [
+            item[0] for item in conn.execute(
+                """SELECT kp.name FROM error_knowledge ek
+                   JOIN knowledge_points kp ON kp.code=ek.knowledge_code
+                   WHERE ek.error_id=? ORDER BY kp.name""",
+                (row["error_id"],),
+            )
+        ]
+        question = None
+        if recommendation:
+            question = dict(recommendation)
+            raw_options = question.pop("options_json", None)
+            question["options"] = json.loads(raw_options) if raw_options else None
+        else:
+            missing_recommendations.append(row["error_id"])
+        items.append({
+            "error_id": row["error_id"],
+            "review_id": row["review_id"],
+            "earliest_due": row["earliest_due"],
+            "overdue_days": overdue_days,
+            "due_stages": row["due_stages"],
+            "priority": round(overdue_days * 10 + row["due_stages"] * 2 + float(row["difficulty"]), 2),
+            "problem_text": row["problem_text"],
+            "cause_code": row["cause_code"],
+            "difficulty": row["difficulty"],
+            "knowledge": knowledge,
+            "question": question,
+        })
+    items.sort(key=lambda item: (-item["priority"], item["earliest_due"], item["error_id"]))
+    total_due_stages = sum(int(item["due_stages"]) for item in items)
+    items = items[:max(1, limit)]
+    selected_ids = {item["error_id"] for item in items}
+    missing_recommendations = [item for item in missing_recommendations if item in selected_ids]
+    packet = {
+        "schema": "math-daily-review-packet/v1",
+        "date": target.isoformat(),
+        "generated_at": now_iso(),
+        "defaults": {"answers": False, "print": False},
+        "selection_rule": "one task per active error; overdue, accumulated stages, then difficulty",
+        "items": items,
+        "missing_reviewed_recommendations": missing_recommendations,
+    }
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "date": target.isoformat(),
+        "due_stages": total_due_stages,
+        "due_errors": len(rows),
+        "selected_errors": len(items),
+        "printable_questions": sum(item["question"] is not None for item in items),
+        "missing_reviewed_recommendations": missing_recommendations,
+        "packet": str(out_path.resolve()),
+        "database_modified": False,
+    }
+
+
+def _workflow_path(project_root: Path, workflow_id: str) -> Path:
+    if not re.fullmatch(r"WF-[0-9A-Za-z._-]+", workflow_id):
+        raise ValueError("invalid workflow id")
+    return project_root / "data" / "workflows" / f"{workflow_id}.json"
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def workflow_start(project_root: Path, kind: str, label: str | None) -> dict[str, Any]:
+    if kind not in WORKFLOW_STEPS:
+        raise ValueError(f"unsupported workflow kind: {kind}")
+    workflow_id = slug_id("WF")
+    payload = {
+        "schema": "math-workflow/v1",
+        "id": workflow_id,
+        "kind": kind,
+        "label": label or kind,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "steps": [
+            {"name": name, "status": "pending", "artifacts": [], "note": ""}
+            for name in WORKFLOW_STEPS[kind]
+        ],
+    }
+    path = _workflow_path(project_root, workflow_id)
+    _write_json_atomic(path, payload)
+    return {"workflow_id": workflow_id, "kind": kind, "next_step": payload["steps"][0]["name"], "manifest": str(path.resolve())}
+
+
+def workflow_update(
+    project_root: Path,
+    workflow_id: str,
+    step_name: str,
+    status: str,
+    artifact: str | None,
+    note: str | None,
+) -> dict[str, Any]:
+    if status not in WORKFLOW_STATUSES:
+        raise ValueError(f"unsupported workflow status: {status}")
+    path = _workflow_path(project_root, workflow_id)
+    if not path.is_file():
+        raise ValueError(f"workflow not found: {workflow_id}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    steps = payload.get("steps") or []
+    index = next((i for i, item in enumerate(steps) if item.get("name") == step_name), None)
+    if index is None:
+        raise ValueError(f"workflow step not found: {step_name}")
+    if status in {"in_progress", "complete"}:
+        incomplete = [item["name"] for item in steps[:index] if item.get("status") != "complete"]
+        if incomplete:
+            raise ValueError("previous workflow steps are incomplete: " + ",".join(incomplete))
+    step = steps[index]
+    step["status"] = status
+    if artifact and artifact not in step.setdefault("artifacts", []):
+        step["artifacts"].append(artifact)
+    if note is not None:
+        step["note"] = note
+    step["updated_at"] = now_iso()
+    payload["updated_at"] = now_iso()
+    _write_json_atomic(path, payload)
+    next_step = next((item["name"] for item in steps if item["status"] != "complete"), None)
+    return {"workflow_id": workflow_id, "step": step_name, "status": status, "next_step": next_step, "complete": next_step is None, "manifest": str(path.resolve())}
+
+
+def workflow_status(project_root: Path, workflow_id: str | None) -> dict[str, Any]:
+    directory = project_root / "data" / "workflows"
+    if workflow_id:
+        path = _workflow_path(project_root, workflow_id)
+        if not path.is_file():
+            raise ValueError(f"workflow not found: {workflow_id}")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["manifest"] = str(path.resolve())
+        return payload
+    records = []
+    paths = list(directory.glob("WF-*.json")) if directory.is_dir() else []
+    for path in paths:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        next_step = next((item["name"] for item in payload.get("steps", []) if item.get("status") != "complete"), None)
+        records.append({"workflow_id": payload["id"], "kind": payload["kind"], "label": payload.get("label"), "updated_at": payload.get("updated_at"), "next_step": next_step})
+    records.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
+    records = records[:20]
+    return {"workflows": records, "count": len(records), "database_modified": False}
+
+
+def behavior_cases(category: str | None, case_id: str | None) -> dict[str, Any]:
+    payload = json.loads(DEFAULT_BEHAVIOR_CASES.read_text(encoding="utf-8"))
+    cases = payload.get("cases") or []
+    if category:
+        cases = [item for item in cases if item.get("category") == category]
+    if case_id:
+        case = next((item for item in cases if item.get("id") == case_id), None)
+        if not case:
+            raise ValueError(f"behavior case not found: {case_id}")
+        return case
+    return {
+        "schema": payload.get("schema"),
+        "count": len(cases),
+        "cases": [{"id": item["id"], "category": item["category"], "title": item["title"]} for item in cases],
+        "database_modified": False,
+    }
 
 
 def mark_review(conn: sqlite3.Connection, error_id: str, result: str, note: str | None, on_date: date) -> dict[str, Any]:
@@ -1578,6 +1795,96 @@ def question_detail(
     return result
 
 
+def search_index_status(conn: sqlite3.Connection) -> dict[str, Any]:
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='questions_fts'"
+    ).fetchone() is not None
+    indexed = conn.execute("SELECT COUNT(*) FROM questions_fts").fetchone()[0] if exists else 0
+    questions = conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
+    return {
+        "available": exists,
+        "indexed_questions": indexed,
+        "questions": questions,
+        "current": bool(exists and indexed == questions),
+    }
+
+
+def rebuild_search_index(
+    conn: sqlite3.Connection, db_path: Path, project_root: Path
+) -> dict[str, Any]:
+    """Create/rebuild an FTS5 trigram index inside the canonical SQLite DB."""
+    backup_dir = project_root / "data" / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    backup_path = backup_dir / f"math_notebook-before-fts-{stamp}.db"
+    backup_conn = sqlite3.connect(backup_path)
+    try:
+        conn.backup(backup_conn)
+    finally:
+        backup_conn.close()
+    try:
+        with conn:
+            conn.execute(
+                """CREATE VIRTUAL TABLE IF NOT EXISTS questions_fts USING fts5(
+                       question_id UNINDEXED, stem, answer, solution, source_name,
+                       tokenize='trigram'
+                   )"""
+            )
+            conn.executescript(
+                """CREATE TRIGGER IF NOT EXISTS questions_fts_ai AFTER INSERT ON questions BEGIN
+                       INSERT INTO questions_fts(rowid,question_id,stem,answer,solution,source_name)
+                       VALUES(new.rowid,new.id,new.stem,new.answer,COALESCE(new.solution,''),new.source_name);
+                   END;
+                   CREATE TRIGGER IF NOT EXISTS questions_fts_ad AFTER DELETE ON questions BEGIN
+                       DELETE FROM questions_fts WHERE rowid=old.rowid;
+                   END;
+                   CREATE TRIGGER IF NOT EXISTS questions_fts_au AFTER UPDATE OF id,stem,answer,solution,source_name ON questions BEGIN
+                       DELETE FROM questions_fts WHERE rowid=old.rowid;
+                       INSERT INTO questions_fts(rowid,question_id,stem,answer,solution,source_name)
+                       VALUES(new.rowid,new.id,new.stem,new.answer,COALESCE(new.solution,''),new.source_name);
+                   END;"""
+            )
+            conn.execute("DELETE FROM questions_fts")
+            conn.execute(
+                """INSERT INTO questions_fts(rowid,question_id,stem,answer,solution,source_name)
+                   SELECT rowid,id,stem,answer,COALESCE(solution,''),source_name FROM questions"""
+            )
+    except sqlite3.Error:
+        # Keep the pre-migration backup available for diagnosis and recovery.
+        raise
+    status = search_index_status(conn)
+    status.update({
+        "backup": str(backup_path.resolve()),
+        "database": str(db_path.resolve()),
+        "database_modified": True,
+    })
+    return status
+
+
+def _fts_query(value: str) -> str:
+    return '"' + value.replace('"', '""').strip() + '"'
+
+
+def fts_candidate_ranks(
+    conn: sqlite3.Connection, terms: list[str], limit: int = 300
+) -> dict[str, int]:
+    if not terms or not search_index_status(conn)["available"]:
+        return {}
+    usable = [term for term in terms if len(term.strip()) >= 2]
+    if not usable:
+        return {}
+    query = " OR ".join(_fts_query(term) for term in usable)
+    try:
+        rows = conn.execute(
+            """SELECT question_id FROM questions_fts
+               WHERE questions_fts MATCH ? ORDER BY bm25(questions_fts) LIMIT ?""",
+            (query, limit),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {row["question_id"]: index for index, row in enumerate(rows)}
+
+
 def search_questions(conn: sqlite3.Connection, args: argparse.Namespace) -> list[dict[str, Any]]:
     clauses = ["1=1"]
     params: list[Any] = []
@@ -1595,9 +1902,18 @@ def search_questions(conn: sqlite3.Connection, args: argparse.Namespace) -> list
     if args.difficulty_max is not None:
         clauses.append("q.difficulty<=?")
         params.append(args.difficulty_max)
+    use_fts = bool(
+        args.text and len(args.text.strip()) >= 3 and search_index_status(conn)["available"]
+    )
     if args.text:
-        clauses.append("q.stem LIKE ?")
-        params.append(f"%{args.text}%")
+        if use_fts:
+            clauses.append(
+                "q.id IN (SELECT question_id FROM questions_fts WHERE questions_fts MATCH ?)"
+            )
+            params.append(_fts_query(args.text))
+        else:
+            clauses.append("q.stem LIKE ?")
+            params.append(f"%{args.text}%")
     if args.verified:
         clauses.append("q.verified=1")
     params.append(args.limit)
@@ -2332,6 +2648,7 @@ def doctor(
         project_root / ".agents" / "skills" / "math-error-notebook" / "scripts" / "paddle_formula_worker.py",
         project_root / ".agents" / "skills" / "math-error-notebook" / "assets" / "error-analysis-template.json",
         project_root / ".agents" / "skills" / "math-error-notebook" / "assets" / "question-review-template.json",
+        project_root / ".agents" / "skills" / "math-error-notebook" / "assets" / "model-behavior-cases.json",
         project_root / "requirements-ocr.txt",
         project_root / "requirements-paddleocr.txt",
         project_root / ".editorconfig",
@@ -2400,6 +2717,7 @@ def doctor(
         "pdf_dependencies": pdf_dependencies,
         "ocr_runtime": ocr_runtime,
         "formula_ocr_runtime": formula_ocr_runtime,
+        "search_index": search_index_status(conn),
         "text_encoding": encoding_status,
         "printer": config.get("printer_name"),
         "libreoffice": str(_find_soffice()) if _find_soffice() else None,
@@ -2452,6 +2770,7 @@ def handoff_snapshot(
 AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
     "grade": {
         "commands": [
+            "behavior-cases --category grade --json",
             "photo-preflight <image...> --json",
             "question <id> --compact --json when the sheet exposes a question ID",
             "causes --text <topic> --json",
@@ -2465,6 +2784,7 @@ AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
     },
     "recommend": {
         "commands": [
+            "behavior-cases --category recommend --json",
             "recommend-packet <error-id> --limit 3 --keyword <type> --feature <code> --out <packet.json> --json",
             "assign-recommendations <error-id> <packet.json> --save --json",
             "question <id> --json only for an ambiguous shortlisted item",
@@ -2473,6 +2793,7 @@ AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
     },
     "verify": {
         "commands": [
+            "behavior-cases --category verify --json",
             "audit-summary --json  # includes simplified_eligible/full_review_required",
             "audit-queue --simplified-only --limit <n> --json",
             "prepare-audit-batch --simplified-only --limit <n> --out-dir <dir> --json",
@@ -2485,8 +2806,9 @@ AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
     },
     "import": {
         "commands": [
-            "scripts/extract_docx_omml.py <docx> --output-dir <dir>",
-            "scripts/build_omml_exam_import.py <extracted.json> --output <jsonl>",
+            "scripts/import_recent_docx_batch.py <directory> --from-date <YYYY-MM-DD> --to-date <YYYY-MM-DD> --batch-name <name> [--import]",
+            "scripts/extract_docx_omml.py <docx> --json <paragraphs.json> --markdown <preview.md> --media-dir <media-dir>",
+            "scripts/build_omml_exam_import.py <exam-dir> --relative-dir <data/imports/...> --batch-name <name> --grade <10|11|12> --semester <1|2> --source-year <year>",
             "import-file <jsonl> --source-name <name> --license <license> --rights-confirmed --json",
             "prepare-audit-batch --source-name <source> --limit <n> --out-dir <dir> --json",
         ],
@@ -2494,6 +2816,7 @@ AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
     },
     "review": {
         "commands": [
+            "daily-review-packet --limit 12 --out <packet.json> --json",
             "due --json", "attempt <question-id> --error-id <error-id> --correct|--wrong --json",
             "review <error-id> --result correct|partial|wrong --json", "stats --json",
         ],
@@ -2501,12 +2824,16 @@ AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
     "pdf": {
         "commands": [
             "practice_sheet.py <error-id>",
+            "practice_sheet.py --daily-packet <packet.json>",
             "practice_sheet.py <error-id> --with-answers",
             "practice_sheet.py <error-id> --print  # only after explicit user request",
         ],
     },
     "maintenance": {
-        "commands": ["doctor --json", "handoff --json", "audit-summary --json", "coverage --json"],
+        "commands": [
+            "doctor --json", "handoff --json", "audit-summary --json", "coverage --json",
+            "workflow-status --json", "rebuild-search-index --json",
+        ],
     },
 }
 
@@ -2826,6 +3153,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--date")
     p.add_argument("--json", action="store_true")
 
+    p = sub.add_parser("daily-review-packet", help="deduplicate due reviews into one compact daily packet")
+    p.add_argument("--date")
+    p.add_argument("--limit", type=int, default=12)
+    p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--json", action="store_true")
+
     p = sub.add_parser("review", help="mark the next review stage")
     p.add_argument("error_id")
     p.add_argument("--result", choices=("correct", "partial", "wrong"), required=True)
@@ -2967,6 +3300,35 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--project-root", type=Path, default=DEFAULT_PROJECT_ROOT)
     p.add_argument("--json", action="store_true")
 
+    p = sub.add_parser("workflow-start", help="start a recoverable deterministic workflow manifest")
+    p.add_argument("--kind", choices=tuple(WORKFLOW_STEPS), required=True)
+    p.add_argument("--label")
+    p.add_argument("--project-root", type=Path, default=DEFAULT_PROJECT_ROOT)
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("workflow-update", help="update one recoverable workflow step")
+    p.add_argument("workflow_id")
+    p.add_argument("--step", required=True)
+    p.add_argument("--status", choices=tuple(sorted(WORKFLOW_STATUSES)), required=True)
+    p.add_argument("--artifact")
+    p.add_argument("--note")
+    p.add_argument("--project-root", type=Path, default=DEFAULT_PROJECT_ROOT)
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("workflow-status", help="show one workflow or the latest workflow summaries")
+    p.add_argument("workflow_id", nargs="?")
+    p.add_argument("--project-root", type=Path, default=DEFAULT_PROJECT_ROOT)
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("behavior-cases", help="list cross-model grading, verification, and recommendation cases")
+    p.add_argument("--category", choices=("grade", "verify", "recommend"))
+    p.add_argument("--id")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("rebuild-search-index", help="backup the canonical DB and rebuild its SQLite FTS5 index")
+    p.add_argument("--project-root", type=Path, default=DEFAULT_PROJECT_ROOT)
+    p.add_argument("--json", action="store_true")
+
     p = sub.add_parser("doctor", help="run one read-only project startup check")
     p.add_argument("--project-root", type=Path, default=DEFAULT_PROJECT_ROOT)
     p.add_argument("--json", action="store_true")
@@ -3088,6 +3450,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
             elif args.command == "due":
                 payload = review_due(conn, parse_date(args.date))
+            elif args.command == "daily-review-packet":
+                payload = daily_review_packet(
+                    conn, parse_date(args.date), max(1, min(args.limit, 50)), args.out
+                )
             elif args.command == "review":
                 payload = mark_review(conn, args.error_id, args.result, args.note, parse_date(args.date))
             elif args.command == "attempt":
@@ -3142,6 +3508,19 @@ def main(argv: list[str] | None = None) -> int:
                 payload = repair_embedded_options(
                     conn, args.verified_only, args.source_name
                 )
+            elif args.command == "workflow-start":
+                payload = workflow_start(args.project_root, args.kind, args.label)
+            elif args.command == "workflow-update":
+                payload = workflow_update(
+                    args.project_root, args.workflow_id, args.step, args.status,
+                    args.artifact, args.note,
+                )
+            elif args.command == "workflow-status":
+                payload = workflow_status(args.project_root, args.workflow_id)
+            elif args.command == "behavior-cases":
+                payload = behavior_cases(args.category, args.id)
+            elif args.command == "rebuild-search-index":
+                payload = rebuild_search_index(conn, args.db, args.project_root)
             elif args.command == "agent-context":
                 payload = agent_context(conn, args.db, args.project_root, args.task)
             elif args.command == "doctor":

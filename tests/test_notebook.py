@@ -1291,6 +1291,74 @@ class NotebookTests(unittest.TestCase):
             ]
         )
 
+    def test_import_context_uses_real_docx_cli_arguments(self):
+        context = notebook.agent_context(self.conn, self.db, ROOT, "import")
+        commands = "\n".join(context["commands"])
+        self.assertIn("--json <paragraphs.json>", commands)
+        self.assertIn("--relative-dir", commands)
+        self.assertIn("import_recent_docx_batch.py", commands)
+        self.assertNotIn("--output-dir", commands)
+
+    def test_daily_review_packet_deduplicates_error_and_loads_for_pdf(self):
+        error_id = self.create_error()
+        notebook.recommend(self.conn, error_id, 2, True, self.root)
+        out = self.root / "daily.json"
+        result = notebook.daily_review_packet(
+            self.conn, date.today() + timedelta(days=31), 12, out
+        )
+        self.assertEqual(result["selected_errors"], 1)
+        self.assertEqual(result["printable_questions"], 1)
+        error, items, knowledge, packet_date = practice_sheet.load_daily_packet(
+            self.db, out
+        )
+        self.assertEqual(len(items), 1)
+        self.assertIn("今日到期复习", error["problem_text"])
+        self.assertTrue(knowledge)
+        self.assertEqual(packet_date, (date.today() + timedelta(days=31)).isoformat())
+
+    def test_recoverable_workflow_enforces_order_and_is_idempotent(self):
+        started = notebook.workflow_start(self.root, "grade", "photo batch")
+        workflow_id = started["workflow_id"]
+        with self.assertRaisesRegex(ValueError, "previous workflow steps"):
+            notebook.workflow_update(
+                self.root, workflow_id, "model_review", "complete", None, None
+            )
+        first = notebook.workflow_update(
+            self.root, workflow_id, "photo_preflight", "complete", "ocr.json", "ok"
+        )
+        again = notebook.workflow_update(
+            self.root, workflow_id, "photo_preflight", "complete", "ocr.json", "ok"
+        )
+        self.assertEqual(first["next_step"], "model_review")
+        status = notebook.workflow_status(self.root, workflow_id)
+        self.assertEqual(status["steps"][0]["artifacts"], ["ocr.json"])
+        self.assertEqual(again["next_step"], "model_review")
+
+    def test_behavior_cases_are_machine_readable(self):
+        listing = notebook.behavior_cases("grade", None)
+        self.assertGreaterEqual(listing["count"], 4)
+        case = notebook.behavior_cases(None, "grade-careless-evidence")
+        self.assertIn("粗心", case["title"])
+        self.assertTrue(case["forbidden"])
+
+    def test_fts_index_search_and_trigger_update(self):
+        status = notebook.rebuild_search_index(self.conn, self.db, self.root)
+        self.assertTrue(status["current"])
+        args = Namespace(
+            knowledge=None, grade=None, difficulty_min=None, difficulty_max=None,
+            text="所有实数", verified=True, limit=20, full=False,
+        )
+        results = notebook.search_questions(self.conn, args)
+        self.assertTrue(results)
+        before = notebook.search_index_status(self.conn)["indexed_questions"]
+        notebook.import_records(
+            self.conn,
+            [{"stem": "三角函数恒等式测试题", "answer": "1", "solution": "直接计算。"}],
+            "FTS测试", None, "Project-Original", True,
+        )
+        after = notebook.search_index_status(self.conn)["indexed_questions"]
+        self.assertEqual(after, before + 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -165,6 +165,27 @@ class ExamIngestWatcherTests(unittest.TestCase):
             self.assertEqual(record["status"], "observed")
             self.assertEqual(record["attempts"], 0)
 
+    def test_retry_command_refuses_to_race_running_service(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = self.make_config(root)
+            downloads = Path(config["watch_dir"])
+            downloads.mkdir()
+            source = downloads / "高二化学期末试卷.docx"
+            write_docx(source, "化学试题")
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            pid_path, lock_path, _ = MODULE.service_paths(config)
+            pid_path.parent.mkdir(parents=True)
+            lock_path.write_text(str(os.getpid()), encoding="ascii")
+
+            result = MODULE.main([
+                "--config", str(config_path), "retry", str(source),
+            ])
+
+            self.assertEqual(result, 1)
+            self.assertFalse(Path(config["state_file"]).exists())
+
     def test_first_start_baselines_existing_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

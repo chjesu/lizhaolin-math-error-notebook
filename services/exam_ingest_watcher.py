@@ -816,6 +816,21 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "stop":
             payload = stop_service(config)
         elif args.command == "retry":
+            pid_path, lock_path, _ = service_paths(config)
+            active_pids = []
+            for runtime_path in (lock_path, pid_path):
+                if not runtime_path.is_file():
+                    continue
+                try:
+                    runtime_pid = int(runtime_path.read_text(encoding="ascii").strip())
+                except (OSError, ValueError):
+                    continue
+                if pid_is_running(runtime_pid):
+                    active_pids.append(runtime_pid)
+            if active_pids:
+                raise RuntimeError(
+                    f"stop watcher PID {active_pids[0]} before retry to avoid a state-file race"
+                )
             payload = ExamIngestWatcher(config).retry_files(args.paths)
         else:
             watcher = ExamIngestWatcher(config)

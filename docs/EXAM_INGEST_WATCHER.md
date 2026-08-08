@@ -32,11 +32,12 @@ powershell -ExecutionPolicy Bypass -File scripts\exam_ingest_watcher.ps1 -Action
 powershell -ExecutionPolicy Bypass -File scripts\exam_ingest_watcher.ps1 -Action stop
 ```
 
-解析器或源文件修复后，可用 Python 权威入口显式重试指定的终结状态文件；
-命令只接受下载目录中的具体路径，不会批量放宽质量门：
+解析器或源文件修复后，先停止后台服务，再用 Python 权威入口显式重试指定的终结状态文件，最后重新启动。`retry` 会拒绝与运行中的服务并发修改状态文件。命令只接受下载目录中的具体路径，不会批量放宽质量门：
 
 ```powershell
+python -X utf8 -B services\exam_ingest_watcher.py stop
 python -X utf8 -B services\exam_ingest_watcher.py retry "C:\Users\Administrator\Downloads\待重试数学试卷.docx"
+python -X utf8 -B services\exam_ingest_watcher.py start
 ```
 
 仅在明确希望把下载目录现有文件也纳入处理时，使用 `-IncludeExisting`。后台日志、状态和事件记录位于 `data/exam-ingest-watcher/`；这是运行数据，不提交 Git。

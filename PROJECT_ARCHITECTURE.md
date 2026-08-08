@@ -109,6 +109,25 @@ flowchart LR
     AR["audit_codex_rollout.py"] --> LOG["脱敏操作时间线"]
 ```
 
+### 3.4 下载目录跨学科自动入库
+
+```mermaid
+flowchart TD
+    DL["Downloads 新文件"] --> ST["稳定性检查：大小/修改时间连续不变"]
+    ST --> CL["文件名 + DOCX 正文轻量分类"]
+    CL -->|"数学 DOCX"| MI["数学现有批次导入器"]
+    CL -->|"物理 DOCX"| PI["物理现有转换器 + notebook.py import-file"]
+    CL -->|"化学 DOCX"| CI["化学现有转换器 + notebook.py import-file"]
+    CL -->|"PDF/DOC/DOCM/分类不明"| KEEP["保留在 Downloads，记录待人工处理"]
+    MI --> QG["原项目质量门 + bank-info 完整性"]
+    PI --> QG
+    CI --> QG
+    QG -->|"imported / already_imported"| E["E:\\李兆霖错题本\\已入库试卷\\学科\\年\\月"]
+    QG -->|"阻塞/失败"| KEEP
+```
+
+权威编排入口为 `services/exam_ingest_watcher.py`，配置为 `config/exam-ingest-watcher.json`，便捷启动器为 `scripts/exam_ingest_watcher.ps1`，操作说明见 `docs/EXAM_INGEST_WATCHER.md`。服务不实现第四套题库或导入器，不直接写任何数据库；运行状态和事件日志位于 `data/exam-ingest-watcher/`。
+
 ## 4. 权威入口与优先级
 
 | 优先级 | 入口 | 用途 | 是否可写主库 |
@@ -118,6 +137,7 @@ flowchart LR
 | 3 | `scripts/extract_docx_omml.py` + `build_omml_exam_import.py` | DOCX/OMML 提取和未验证导入文件构建 | 否 |
 | 3 | `scripts/extract_pdf_text.py` | PDF 原文审核辅助 | 否 |
 | 4 | 其他 `scripts/*.py` | 历史批次、取证或专项迁移 | 除明确调用 `notebook.py` 外不得写库 |
+| 编排 | `services/exam_ingest_watcher.py` | 监听下载目录，调用三科已有导入流程，成功后安全归档 | 否，只调用各项目权威入口 |
 
 新智能体不得创建第二套数据库访问层、推荐器、PDF生成器或验证器。可复用功能应扩展权威入口，并补充 `tests/test_notebook.py`。
 

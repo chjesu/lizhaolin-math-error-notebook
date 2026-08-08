@@ -5,6 +5,7 @@ data/imports/
 data/raw/
 data/images/
 data/backups/
+data/exam-ingest-watcher/
 errors/
 practice/
 output/

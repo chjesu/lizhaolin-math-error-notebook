@@ -3,7 +3,7 @@
 
 This service is an orchestration layer only.  It never opens or writes a
 notebook database directly: every import is performed by the target project's
-existing converter and ``notebook.py import-file`` quality gates.
+authoritative converter or ``notebook.py`` import command.
 """
 
 from __future__ import annotations
@@ -182,6 +182,8 @@ class ImportOrchestrator:
         input_dir = self._stage_source(source, root, digest, subject)
         if subject == "math":
             outcome = self._import_math(root, project, notebook, input_dir, source, digest)
+        elif subject == "chemistry":
+            outcome = self._import_chemistry(root, notebook, input_dir, digest)
         else:
             outcome = self._import_science(subject, root, project, notebook, input_dir, source, digest)
         outcome["bank"] = self._verify_bank(root, notebook)
@@ -224,6 +226,92 @@ class ImportOrchestrator:
             )
         status = "imported" if int(summary.get("imported_sources", 0)) else "already_imported"
         return {"status": status, "subject": "math", "summary": summary}
+
+    def _import_chemistry(
+        self,
+        root: Path,
+        notebook: Path,
+        input_dir: Path,
+        digest: str,
+    ) -> dict[str, Any]:
+        output_root = root / "data" / "raw" / "auto-ingest" / digest[:16]
+        empty_known = root / "data" / "auto-ingest" / digest[:16] / "empty-known"
+        empty_known.mkdir(parents=True, exist_ok=True)
+        imported = self._run(
+            [
+                str(self.python), "-X", "utf8", "-B", str(notebook),
+                "import-docx-batch", str(input_dir),
+                "--batch-name", f"auto-download-{digest[:12]}",
+                "--output-root", str(output_root),
+                "--project-root", str(root),
+                "--known-root", str(empty_known),
+                "--limit", "1", "--license", self.config["license"],
+                "--rights-confirmed", "--import", "--json",
+            ],
+            root,
+        )
+        if imported.returncode:
+            raise RuntimeError((imported.stderr or imported.stdout)[-1800:])
+
+        summary = imported.payload
+        manifest_path = Path(str(summary.get("manifest") or ""))
+        manifest = load_json(manifest_path, {}) if manifest_path.is_file() else {}
+        files = manifest.get("files") or []
+        item = files[0] if len(files) == 1 else {}
+        item_status = str(item.get("status") or "")
+        expected_statuses = {item_status: 1} if item_status else {}
+        manifest_matches = (
+            manifest.get("schema") == "chemistry-docx-import-batch/v1"
+            and manifest.get("do_import") is True
+            and len(files) == 1
+            and str(item.get("sha256") or "").casefold() == digest.casefold()
+            and summary.get("statuses") == expected_statuses
+            and int(summary.get("files", 0)) == 1
+        )
+        if item_status == "imported":
+            gate = item.get("quality_gate_result") or {}
+            transaction = item.get("import_result") or {}
+            accepted = (
+                manifest_matches
+                and gate.get("status") == "pass"
+                and transaction.get("transaction") == "committed"
+                and int(transaction.get("expected_records", -1))
+                == int(transaction.get("accounted_records", -2))
+                and int(summary.get("imported_sources", 0)) == 1
+                and int(summary.get("blocked_sources", 0)) == 0
+            )
+            status = "imported"
+        elif item_status == "skipped_existing_source":
+            accepted = (
+                manifest_matches
+                and int(item.get("existing_questions", 0)) > 0
+                and int(summary.get("imported_sources", 0)) == 0
+                and int(summary.get("skipped_existing_sources", 0)) == 1
+                and int(summary.get("blocked_sources", 0)) == 0
+            )
+            status = "already_imported"
+        else:
+            accepted = False
+            status = "quality_blocked"
+
+        if not accepted:
+            evidence = {
+                "summary": summary,
+                "item_status": item_status,
+                "source_sha256": item.get("sha256"),
+                "manifest": str(manifest_path),
+            }
+            raise QualityGateError(
+                "chemistry authoritative import did not produce one committed or existing source: "
+                + json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))[-2200:]
+            )
+        return {
+            "status": status,
+            "subject": "chemistry",
+            "summary": summary,
+            "manifest": str(manifest_path.resolve()),
+            "verification_status": "pending_per_item",
+        }
 
     def _import_science(
         self,

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "services" / "exam_ingest_watcher.py"
@@ -217,6 +218,131 @@ class ExamIngestWatcherTests(unittest.TestCase):
 
             self.assertTrue((input_dir / "物理-期末试卷.docx").is_file())
             self.assertEqual(source.name, "期末试卷.docx")
+
+    def test_chemistry_uses_authoritative_docx_batch_import(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "data" / "auto-ingest" / "abc" / "input"
+            input_dir.mkdir(parents=True)
+            digest = "a" * 64
+            calls = []
+
+            def runner(command, cwd, timeout):
+                calls.append((command, cwd, timeout))
+                output_root = Path(command[command.index("--output-root") + 1])
+                manifest_path = output_root / "import-manifest.json"
+                manifest_path.parent.mkdir(parents=True)
+                manifest_path.write_text(json.dumps({
+                    "schema": "chemistry-docx-import-batch/v1",
+                    "do_import": True,
+                    "files": [{
+                        "status": "imported",
+                        "sha256": digest,
+                        "quality_gate_result": {"status": "pass"},
+                        "import_result": {
+                            "transaction": "committed",
+                            "expected_records": 19,
+                            "accounted_records": 19,
+                        },
+                    }],
+                }), encoding="utf-8")
+                payload = {
+                    "files": 1,
+                    "statuses": {"imported": 1},
+                    "imported_sources": 1,
+                    "blocked_sources": 0,
+                    "skipped_existing_sources": 0,
+                    "manifest": str(manifest_path),
+                }
+                return MODULE.CommandResult(0, payload, json.dumps(payload), "")
+
+            config = self.make_config(root)
+            config["command_timeout_seconds"] = 37
+            orchestrator = MODULE.ImportOrchestrator(config, runner=runner)
+            result = orchestrator._import_chemistry(
+                root, root / "notebook.py", input_dir, digest
+            )
+
+            command, cwd, timeout = calls[0]
+            self.assertEqual(cwd, root)
+            self.assertEqual(timeout, 37)
+            self.assertIn("import-docx-batch", command)
+            self.assertIn("--known-root", command)
+            self.assertIn("--rights-confirmed", command)
+            self.assertIn("--import", command)
+            self.assertEqual(result["status"], "imported")
+            self.assertEqual(result["verification_status"], "pending_per_item")
+
+    def test_chemistry_quality_block_is_not_archivable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            digest = "b" * 64
+
+            def runner(command, cwd, timeout):
+                output_root = Path(command[command.index("--output-root") + 1])
+                manifest_path = output_root / "import-manifest.json"
+                manifest_path.parent.mkdir(parents=True)
+                manifest_path.write_text(json.dumps({
+                    "schema": "chemistry-docx-import-batch/v1",
+                    "do_import": True,
+                    "files": [{
+                        "status": "blocked_quality_gate",
+                        "sha256": digest,
+                    }],
+                }), encoding="utf-8")
+                payload = {
+                    "files": 1,
+                    "statuses": {"blocked_quality_gate": 1},
+                    "imported_sources": 0,
+                    "blocked_sources": 1,
+                    "skipped_existing_sources": 0,
+                    "manifest": str(manifest_path),
+                }
+                return MODULE.CommandResult(0, payload, json.dumps(payload), "")
+
+            orchestrator = MODULE.ImportOrchestrator(self.make_config(root), runner=runner)
+            with self.assertRaisesRegex(MODULE.QualityGateError, "chemistry authoritative import"):
+                orchestrator._import_chemistry(
+                    root, root / "notebook.py", input_dir, digest
+                )
+
+    def test_import_routing_changes_only_chemistry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "Downloads" / "试卷.docx"
+            source.parent.mkdir()
+            write_docx(source, "试题")
+            digest = MODULE.file_sha256(source)
+            config = self.make_config(root)
+            config["projects"] = {
+                subject: {
+                    "root": str(root / subject),
+                    "notebook": "notebook.py",
+                    "docx_converter": "converter.py",
+                }
+                for subject in ("math", "physics", "chemistry")
+            }
+            orchestrator = MODULE.ImportOrchestrator(config)
+
+            with (
+                patch.object(orchestrator, "_stage_source", return_value=root / "input"),
+                patch.object(orchestrator, "_verify_bank", return_value={"integrity_check": "ok"}),
+                patch.object(orchestrator, "_import_math", return_value={"status": "imported"}) as math_import,
+                patch.object(orchestrator, "_import_science", return_value={"status": "imported"}) as science_import,
+                patch.object(orchestrator, "_import_chemistry", return_value={"status": "imported"}) as chemistry_import,
+            ):
+                orchestrator.import_file("chemistry", source, digest)
+                chemistry_import.assert_called_once()
+                math_import.assert_not_called()
+                science_import.assert_not_called()
+
+                chemistry_import.reset_mock()
+                orchestrator.import_file("physics", source, digest)
+                science_import.assert_called_once()
+                chemistry_import.assert_not_called()
+                math_import.assert_not_called()
 
 
 if __name__ == "__main__":

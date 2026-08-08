@@ -117,7 +117,7 @@ flowchart TD
     ST --> CL["文件名 + DOCX 正文轻量分类"]
     CL -->|"数学 DOCX"| MI["数学现有批次导入器"]
     CL -->|"物理 DOCX"| PI["物理现有转换器 + notebook.py import-file"]
-    CL -->|"化学 DOCX"| CI["化学现有转换器 + notebook.py import-file"]
+    CL -->|"化学 DOCX"| CI["化学 notebook.py import-docx-batch：逐卷质量门 + 原子入库"]
     CL -->|"PDF/DOC/DOCM/分类不明"| KEEP["保留在 Downloads，记录待人工处理"]
     MI --> QG["原项目质量门 + bank-info 完整性"]
     PI --> QG
@@ -126,7 +126,7 @@ flowchart TD
     QG -->|"阻塞/失败"| KEEP
 ```
 
-权威编排入口为 `services/exam_ingest_watcher.py`，配置为 `config/exam-ingest-watcher.json`，便捷启动器为 `scripts/exam_ingest_watcher.ps1`，操作说明见 `docs/EXAM_INGEST_WATCHER.md`。服务不实现第四套题库或导入器，不直接写任何数据库；运行状态和事件日志位于 `data/exam-ingest-watcher/`。解析器或源文件修复后用 `retry <具体路径...>` 显式重新排队，不能批量绕过质量门。
+权威编排入口为 `services/exam_ingest_watcher.py`，配置为 `config/exam-ingest-watcher.json`，便捷启动器为 `scripts/exam_ingest_watcher.ps1`，操作说明见 `docs/EXAM_INGEST_WATCHER.md`。服务不实现第四套题库或导入器，不直接写任何数据库；化学分支只调用化学项目的 `import-docx-batch`，不会触发批量模型审核或自动验证。运行状态和事件日志位于 `data/exam-ingest-watcher/`。解析器或源文件修复后用 `retry <具体路径...>` 显式重新排队，不能批量绕过质量门。
 
 ## 4. 权威入口与优先级
 

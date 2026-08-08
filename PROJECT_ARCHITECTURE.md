@@ -126,7 +126,7 @@ flowchart TD
     QG -->|"阻塞/失败"| KEEP
 ```
 
-权威编排入口为 `services/exam_ingest_watcher.py`，配置为 `config/exam-ingest-watcher.json`，便捷启动器为 `scripts/exam_ingest_watcher.ps1`，操作说明见 `docs/EXAM_INGEST_WATCHER.md`。服务不实现第四套题库或导入器，不直接写任何数据库；运行状态和事件日志位于 `data/exam-ingest-watcher/`。
+权威编排入口为 `services/exam_ingest_watcher.py`，配置为 `config/exam-ingest-watcher.json`，便捷启动器为 `scripts/exam_ingest_watcher.ps1`，操作说明见 `docs/EXAM_INGEST_WATCHER.md`。服务不实现第四套题库或导入器，不直接写任何数据库；运行状态和事件日志位于 `data/exam-ingest-watcher/`。解析器或源文件修复后用 `retry <具体路径...>` 显式重新排队，不能批量绕过质量门。
 
 ## 4. 权威入口与优先级
 
@@ -234,7 +234,7 @@ python -B .agents\skills\math-error-notebook\scripts\practice_sheet.py --daily-p
 
 | 脚本 | 类型 | 作用 | 新任务使用规则 |
 |---|---|---|---|
-| `scripts/extract_docx_omml.py` | 通用、只读提取 | 直接读取 OOXML，将微软 OMML 公式转为 LaTeX，导出段落 JSON/Markdown/媒体 | DOCX 精确公式提取首选 |
+| `scripts/extract_docx_omml.py` | 通用、只读提取 | 直接读取 OOXML，将微软 OMML 公式转为 LaTeX；保留旧式 MathType/OLE 的 VML 预览图；导出段落 JSON/Markdown/媒体 | DOCX 精确公式提取首选；OLE 预览仍须视觉/公式 OCR 复核 |
 | `scripts/docx_parsing.py` | 通用解析库 | 清理 OMML 转换后的 LaTeX，并拆分混合格式选项且保留同行题干 | 由通用构建器和历史专项脚本共同复用，禁止再从专项脚本导入通用能力 |
 | `scripts/build_omml_exam_import.py` | 通用批次转换 | 兼容常见题号/选项标记，分题并保留原段落范围，配对答案/真实解析，输出未验证 JSONL 与缺题、重号、解析失败等质量报告 | 与上一脚本配套；质量门通过后才可导入，导入后仍逐题验证 |
 | `scripts/import_recent_docx_batch.py` | 日期批次编排 | 去重后调用 OMML 提取与构建，并在 `import-file` 前检查题号连续性、解析失败、字段完整性和选项结构 | 任一异常标记 `blocked_quality_gate` 并停止该卷入库；不得绕过 |

@@ -20,6 +20,8 @@ NS = {
     "m": "http://schemas.openxmlformats.org/officeDocument/2006/math",
     "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "v": "urn:schemas-microsoft-com:vml",
+    "o": "urn:schemas-microsoft-com:office:office",
     "pr": "http://schemas.openxmlformats.org/package/2006/relationships",
 }
 
@@ -212,9 +214,15 @@ def paragraph_text(paragraph: ET.Element, relationships: dict[str, str]) -> tupl
             return "\t"
         if name in {"br", "cr"}:
             return "\n"
-        if name == "blip":
-            rel_id = node.attrib.get(qname("r", "embed"), "")
+        if name in {"blip", "imagedata"}:
+            rel_id = (
+                node.attrib.get(qname("r", "embed"), "")
+                or node.attrib.get(qname("r", "id"), "")
+                or node.attrib.get(qname("o", "relid"), "")
+            )
             target = relationships.get(rel_id, rel_id)
+            if not target:
+                return ""
             images.append(target)
             return f"[IMAGE:{target}]"
         if name in {"instrText", "delText"}:

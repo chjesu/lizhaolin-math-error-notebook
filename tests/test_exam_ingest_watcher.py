@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import tempfile
 import unittest
 import zipfile
@@ -48,6 +49,24 @@ class ExamIngestWatcherTests(unittest.TestCase):
 
             self.assertEqual(MODULE.classify_subject(named)[0], "physics")
             self.assertEqual(MODULE.classify_subject(body_only)[0], "chemistry")
+
+    def test_pid_detection_recognizes_current_process(self):
+        self.assertTrue(MODULE.pid_is_running(os.getpid()))
+        self.assertFalse(MODULE.pid_is_running(2_147_483_647))
+
+    def test_once_scan_refuses_to_race_a_running_service(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = self.make_config(root)
+            Path(config["watch_dir"]).mkdir()
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            _, lock_path, _ = MODULE.service_paths(config)
+            lock_path.parent.mkdir(parents=True)
+            lock_path.write_text(str(os.getpid()), encoding="ascii")
+
+            with self.assertRaisesRegex(RuntimeError, "one-off scan would race"):
+                MODULE.run_service(config_path, include_existing=True, once=True)
 
     def test_successful_import_is_archived(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -120,6 +139,30 @@ class ExamIngestWatcherTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             record = next(iter(watcher.state["files"].values()))
             self.assertEqual(record["status"], "quality_blocked")
+
+    def test_explicit_retry_requeues_a_quality_blocked_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = self.make_config(root)
+            downloads = Path(config["watch_dir"])
+            downloads.mkdir()
+            source = downloads / "高二数学期末试卷.docx"
+            write_docx(source, "数学试题")
+            watcher = MODULE.ExamIngestWatcher(
+                config,
+                importer=lambda *_: (_ for _ in ()).throw(
+                    MODULE.QualityGateError("option labels need parser repair")
+                ),
+            )
+            watcher.scan_once(include_existing=True)
+            watcher.scan_once(include_existing=True)
+
+            result = watcher.retry_files([source])
+            record = next(iter(watcher.state["files"].values()))
+
+            self.assertEqual(result["retried"], [str(source.resolve())])
+            self.assertEqual(record["status"], "observed")
+            self.assertEqual(record["attempts"], 0)
 
     def test_first_start_baselines_existing_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:

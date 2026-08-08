@@ -487,6 +487,51 @@ class ExamIngestWatcher:
             "event_log": str(self.log_path.resolve()),
         }
 
+    def retry_files(self, paths: list[Path]) -> dict[str, Any]:
+        """Explicitly requeue terminal files after a parser or source repair."""
+        records: dict[str, dict[str, Any]] = self.state.setdefault("files", {})
+        watch_root = self.watch_dir.resolve()
+        retried: list[str] = []
+        skipped: list[dict[str, str]] = []
+        retryable = {
+            "classification_required", "quality_blocked", "retry_wait", "import_failed"
+        }
+        for supplied in paths:
+            resolved = supplied.resolve()
+            if resolved.parent != watch_root:
+                skipped.append({"path": str(resolved), "reason": "outside_watch_directory"})
+                continue
+            key = str(resolved)
+            record = records.get(key)
+            if not resolved.is_file():
+                skipped.append({"path": key, "reason": "file_not_found"})
+                continue
+            if record is None or record.get("status") not in retryable:
+                skipped.append({"path": key, "reason": "not_in_retryable_terminal_state"})
+                continue
+            previous_status = str(record.get("status"))
+            record.update(
+                status="observed",
+                signature=file_signature(resolved),
+                # The file already reached a terminal state after the normal
+                # stability gate; an explicit retry need not wait three more
+                # polling cycles.  Minimum-age and current signature checks
+                # still apply in ``scan_once``.
+                stable_checks=max(1, int(self.config.get("stable_checks", 3))),
+                first_seen=now_iso(),
+                attempts=0,
+                last_error=None,
+            )
+            record.pop("retry_not_before", None)
+            retried.append(key)
+            self._event({
+                "event": "requeued",
+                "path": key,
+                "previous_status": previous_status,
+            })
+        self._save()
+        return {"status": "ok", "retried": retried, "skipped": skipped}
+
 
 def load_config(path: Path) -> dict[str, Any]:
     config = json.loads(path.read_text(encoding="utf-8"))
@@ -529,6 +574,23 @@ def doctor(config: dict[str, Any]) -> dict[str, Any]:
 def pid_is_running(pid: int) -> bool:
     if pid <= 0:
         return False
+    if os.name == "nt":
+        # ``tasklist`` can return Access Denied for a detached process even
+        # when that process is healthy.  Query the process handle directly so
+        # status/retry operations do not race a live watcher with stale state.
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        process_query_limited_information = 0x1000
+        still_active = 259
+        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == 5  # Access denied still proves existence.
+        try:
+            exit_code = ctypes.c_ulong()
+            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))) and exit_code.value == still_active
+        finally:
+            kernel32.CloseHandle(handle)
     completed = subprocess.run(
         ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -547,6 +609,20 @@ def run_service(config_path: Path, include_existing: bool, once: bool) -> int:
     watcher.archive_root.mkdir(parents=True, exist_ok=True)
     pid_path, lock_path, _ = service_paths(config)
     pid_path.parent.mkdir(parents=True, exist_ok=True)
+    if once:
+        if lock_path.is_file():
+            try:
+                existing_pid = int(lock_path.read_text(encoding="ascii").strip())
+            except (OSError, ValueError):
+                existing_pid = 0
+            if pid_is_running(existing_pid):
+                raise RuntimeError(
+                    f"watcher is already running with PID {existing_pid}; "
+                    "a one-off scan would race its state"
+                )
+            lock_path.unlink(missing_ok=True)
+        print(json.dumps(watcher.scan_once(include_existing), ensure_ascii=False, separators=(",", ":")))
+        return 0
     if lock_path.exists():
         try:
             existing_pid = int(lock_path.read_text(encoding="ascii").strip())
@@ -558,9 +634,6 @@ def run_service(config_path: Path, include_existing: bool, once: bool) -> int:
     lock_path.write_text(str(os.getpid()), encoding="ascii")
     pid_path.write_text(str(os.getpid()), encoding="ascii")
     try:
-        if once:
-            print(json.dumps(watcher.scan_once(include_existing), ensure_ascii=False, separators=(",", ":")))
-            return 0
         first = True
         while True:
             result = watcher.scan_once(include_existing if first else False)
@@ -641,6 +714,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--include-existing", action="store_true")
     sub.add_parser("stop")
     sub.add_parser("status")
+    p = sub.add_parser("retry")
+    p.add_argument("paths", type=Path, nargs="+")
     args = parser.parse_args(argv)
     try:
         config = load_config(args.config)
@@ -652,6 +727,8 @@ def main(argv: list[str] | None = None) -> int:
             payload = start_service(args.config, args.include_existing)
         elif args.command == "stop":
             payload = stop_service(config)
+        elif args.command == "retry":
+            payload = ExamIngestWatcher(config).retry_files(args.paths)
         else:
             watcher = ExamIngestWatcher(config)
             pid_path, _, log_path = service_paths(config)

@@ -48,30 +48,29 @@ def _option_label(match: re.Match[str]) -> str:
 
 
 def split_options(lines: list[str]) -> tuple[list[str], list[str]]:
-    """Split A-D choices while preserving a same-paragraph stem prefix."""
-    labels: list[str] = []
-    for line in lines:
-        matches = list(OPTION_MARKER_RE.finditer(line))
-        labels.extend(_option_label(match) for match in matches)
-    if not labels or labels[0] != "A" or "B" not in labels:
+    """Split the last complete A-D choice block and preserve its stem prefix.
+
+    Point references such as ``A、B两点`` and ``C、D`` can use the same
+    punctuation as option labels.  A real choice block must therefore be an
+    ordered A-B-C-D quartet; choosing the last complete quartet keeps those
+    earlier point references in the stem.
+    """
+    joined = "\n".join(lines)
+    matches = list(OPTION_MARKER_RE.finditer(joined))
+    labels = [_option_label(match) for match in matches]
+    starts = [
+        index
+        for index in range(max(0, len(matches) - 3))
+        if labels[index : index + 4] == list("ABCD")
+    ]
+    if not starts:
         return [], list(lines)
-
-    option_chunks: list[str] = []
-    remaining: list[str] = []
-    for line in lines:
-        matches = list(OPTION_MARKER_RE.finditer(line))
-        if not matches:
-            remaining.append(line)
-            continue
-        prefix = line[:matches[0].start()].strip()
-        if prefix:
-            remaining.append(prefix)
-        option_chunks.append(line[matches[0].start():].strip())
-
-    option_text = " ".join(option_chunks)
-    matches = list(OPTION_MARKER_RE.finditer(option_text))
+    start = starts[-1]
+    selected = matches[start : start + 4]
+    prefix = joined[: selected[0].start()].strip()
+    remaining = [line.strip() for line in prefix.splitlines() if line.strip()]
     options: list[str] = []
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(option_text)
-        options.append(_option_label(match) + "．" + option_text[match.end():end].strip())
+    for index, match in enumerate(selected):
+        end = selected[index + 1].start() if index + 1 < len(selected) else len(joined)
+        options.append(_option_label(match) + "．" + joined[match.end():end].strip())
     return options, remaining

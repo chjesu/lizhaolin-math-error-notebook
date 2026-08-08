@@ -2,6 +2,7 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +14,12 @@ SPEC = importlib.util.spec_from_file_location("build_omml_exam_import", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(MODULE)
+
+EXTRACT_SCRIPT = SCRIPTS / "extract_docx_omml.py"
+EXTRACT_SPEC = importlib.util.spec_from_file_location("extract_docx_omml", EXTRACT_SCRIPT)
+EXTRACT_MODULE = importlib.util.module_from_spec(EXTRACT_SPEC)
+assert EXTRACT_SPEC.loader is not None
+EXTRACT_SPEC.loader.exec_module(EXTRACT_MODULE)
 
 
 class OptionParsingTests(unittest.TestCase):
@@ -31,6 +38,34 @@ class OptionParsingTests(unittest.TestCase):
 
         self.assertEqual(options, [])
         self.assertEqual(remaining, source)
+
+    def test_point_labels_before_choices_remain_in_stem(self):
+        options, remaining = MODULE.split_options([
+            "7．图象与x轴、y轴相交于A、B两点，与直线相交于C、D两点，则（ ）",
+            "A．-1 B．-5/6 C．5/6 D．5/3",
+        ])
+
+        self.assertIn("A、B两点", remaining[0])
+        self.assertIn("C、D两点", remaining[0])
+        self.assertEqual([item.split("．", 1)[0] for item in options], list("ABCD"))
+
+
+class LegacyImageExtractionTests(unittest.TestCase):
+    def test_vml_imagedata_preview_is_preserved(self):
+        paragraph = ET.fromstring(
+            '<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+            'xmlns:v="urn:schemas-microsoft-com:vml" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            '<w:r><w:t>答案：</w:t></w:r><w:r><w:object><v:shape>'
+            '<v:imagedata r:id="rId42"/></v:shape></w:object></w:r></w:p>'
+        )
+
+        text, images = EXTRACT_MODULE.paragraph_text(
+            paragraph, {"rId42": "media/image42.png"}
+        )
+
+        self.assertEqual(text, "答案：[IMAGE:media/image42.png]")
+        self.assertEqual(images, ["media/image42.png"])
 
 
 class SegmentationTests(unittest.TestCase):
@@ -162,6 +197,24 @@ class QuestionParsingTests(unittest.TestCase):
         self.assertEqual(
             question["answer"],
             "![原题图](data/imports/batch-01/paper-01/media/image1.png)",
+        )
+
+    def test_option_images_are_localized_too(self):
+        lines = [
+            "5．请选择正确图象（ ）",
+            "A．[IMAGE:media/image1.png] B．[IMAGE:media/image2.png] "
+            "C．[IMAGE:media/image3.png] D．[IMAGE:media/image4.png]",
+            "【答案】B",
+            "【解析】根据函数性质可以排除其余三个选项。",
+        ]
+
+        question = MODULE.parse_question(
+            5, "一、选择题", lines, "paper-01", "batch-01", 10, 1, "2025-2026"
+        )
+
+        self.assertEqual(
+            question["options"][0],
+            "A．![原题图](data/imports/batch-01/paper-01/media/image1.png)",
         )
 
     def test_quality_gate_blocks_skips_and_number_gaps(self):

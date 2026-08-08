@@ -290,7 +290,10 @@ def parse_question(
         "source_section": section,
     }
     if options:
-        record["options"] = [clean_latex(option) for option in options]
+        record["options"] = [
+            localize_images(clean_latex(option), batch_name, relative_dir)
+            for option in options
+        ]
     return record
 
 

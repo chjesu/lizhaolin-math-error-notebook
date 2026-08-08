@@ -81,6 +81,15 @@ DEFAULT_KNOWLEDGE = SKILL_DIR / "assets/knowledge-points.json"
 DEFAULT_SEED = SKILL_DIR / "assets/seed-questions.jsonl"
 DEFAULT_BEHAVIOR_CASES = SKILL_DIR / "assets/model-behavior-cases.json"
 DEFAULT_PROJECT_ROOT = DEFAULT_DB.parent.parent
+BUNDLED_PYTHON = (
+    Path.home()
+    / ".cache"
+    / "codex-runtimes"
+    / "codex-primary-runtime"
+    / "dependencies"
+    / "python"
+    / "python.exe"
+)
 RELIABLE_BATCH = "2026-07-19-g11-beijing-20"
 SIMPLIFIED_VERIFICATION_FROM = "2026-07-20"
 RECOMMENDATION_BLOCK_PATTERNS = (
@@ -91,6 +100,7 @@ RECOMMENDATION_BLOCK_PATTERNS = (
     "答案待补",
     "待补充题干",
 )
+MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 WORKFLOW_STEPS: dict[str, tuple[str, ...]] = {
     "grade": ("photo_preflight", "model_review", "grade_preview", "grade_commit", "recommend"),
     "import": ("extract", "quality_gate", "import", "audit_prepare", "model_review", "verify"),
@@ -2208,6 +2218,93 @@ def audit_item(
     return packet
 
 
+def prepare_audit_visual_previews(
+    packet: dict[str, Any],
+    project_root: Path,
+    preview_dir: Path,
+) -> list[dict[str, Any]]:
+    """Create white-background PNG copies only for model visual verification.
+
+    Imported media remains untouched. Word often stores black line art on a
+    transparent PNG canvas, which some model image viewers render as solid black.
+    Audit packets point reviewers to an opaque preview while preserving the
+    original path for provenance and later reprocessing.
+    """
+    question = packet.get("question") or {}
+    values = [
+        str(question.get("stem") or ""),
+        str(question.get("stored_answer") or ""),
+        str(question.get("stored_solution") or ""),
+    ]
+    values.extend(str(item) for item in (question.get("options") or []))
+    references: list[str] = []
+    for value in values:
+        for reference in MARKDOWN_IMAGE_RE.findall(value):
+            cleaned = reference.strip()
+            if cleaned and cleaned not in references:
+                references.append(cleaned)
+    if not references:
+        return []
+
+    try:
+        from PIL import Image, ImageOps
+    except (ImportError, OSError) as exc:
+        raise RuntimeError(
+            "visual audit previews require Pillow; run prepare-audit-batch with "
+            "the bundled Codex Python"
+        ) from exc
+
+    question_id = re.sub(r"[^0-9A-Za-z._-]+", "_", str(question.get("id") or "question"))
+    results: list[dict[str, Any]] = []
+    for reference in references:
+        if re.match(r"^[a-z][a-z0-9+.-]*://", reference, flags=re.IGNORECASE):
+            results.append({
+                "original_reference": reference,
+                "status": "remote_reference",
+            })
+            continue
+        source = Path(reference)
+        if not source.is_absolute():
+            source = project_root / source
+        source = source.resolve()
+        if not source.is_file():
+            results.append({
+                "original_reference": reference,
+                "original_path": str(source),
+                "status": "missing",
+            })
+            continue
+        if source.suffix.casefold() != ".png":
+            results.append({
+                "original_reference": reference,
+                "original_path": str(source),
+                "review_path": str(source),
+                "status": "original",
+            })
+            continue
+
+        digest = hashlib.sha256(
+            f"{source}|{source.stat().st_mtime_ns}|audit-png-white-v1".encode("utf-8")
+        ).hexdigest()[:16]
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        destination = preview_dir / f"{question_id}-{digest}.png"
+        if not destination.is_file():
+            with Image.open(source) as opened:
+                opened.load()
+                transposed = ImageOps.exif_transpose(opened)
+                rgba = transposed.convert("RGBA")
+                white = Image.new("RGBA", rgba.size, "white")
+                preview = Image.alpha_composite(white, rgba).convert("RGB")
+                preview.save(destination, format="PNG", optimize=True)
+        results.append({
+            "original_reference": reference,
+            "original_path": str(source),
+            "review_path": str(destination.resolve()),
+            "status": "opaque_preview",
+        })
+    return results
+
+
 def apply_verification_review(
     conn: sqlite3.Connection,
     question_id: str,
@@ -2890,6 +2987,7 @@ def prepare_audit_batch(
     )
     packets_dir = out_dir / "packets"
     reviews_dir = out_dir / "reviews"
+    previews_dir = out_dir / "visual-previews"
     items: list[dict[str, Any]] = []
     skipped: list[str] = []
     for row in rows:
@@ -2902,6 +3000,18 @@ def prepare_audit_batch(
             continue
         summary = audit_item(conn, question_id, packet_path)
         packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        packet["visual_review_images"] = prepare_audit_visual_previews(
+            packet, DEFAULT_PROJECT_ROOT, previews_dir
+        )
+        unsigned_packet = dict(packet)
+        unsigned_packet.pop("packet_sha256", None)
+        canonical = json.dumps(
+            unsigned_packet, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        packet["packet_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        packet_path.write_text(
+            json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         question = packet["question"]
         review = {
             "question_id": question_id,
@@ -2937,6 +3047,7 @@ def prepare_audit_batch(
             "verification_mode": packet["verification_mode"],
             "issues": summary["issues"],
             "near_duplicates": summary["near_duplicate_count"],
+            "visual_review_images": packet["visual_review_images"],
         })
     manifest = {
         "schema": "math-audit-work-batch/v1",
@@ -3355,6 +3466,16 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "prepare-audit-batch":
+        try:
+            import PIL.Image  # noqa: F401
+        except (ImportError, OSError):
+            if BUNDLED_PYTHON.is_file() and Path(sys.executable).resolve() != BUNDLED_PYTHON.resolve():
+                forwarded = list(argv) if argv is not None else sys.argv[1:]
+                return subprocess.run([
+                    str(BUNDLED_PYTHON), str(Path(__file__).resolve()), *forwarded
+                ]).returncode
+            parser.error("prepare-audit-batch requires Pillow for visual audit previews")
     try:
         if args.command == "photo-preflight":
             from photo_ocr import ensure_ocr_runtime, process_photos

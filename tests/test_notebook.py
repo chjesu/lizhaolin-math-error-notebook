@@ -624,6 +624,36 @@ class NotebookTests(unittest.TestCase):
         self.assertFalse(review["checklist"]["answer_derived"])
         self.assertEqual(before, after)
 
+    def test_prepare_audit_batch_creates_opaque_png_visual_preview(self):
+        from PIL import Image as PILImage
+
+        source = self.root / "transparent-audit.png"
+        image = PILImage.new("RGBA", (20, 10), (0, 0, 0, 0))
+        image.putpixel((8, 5), (0, 0, 0, 255))
+        image.save(source)
+        notebook.import_records(
+            self.conn,
+            [{
+                "stem": f"观察图形。![图]({source.as_posix()})",
+                "answer": "1",
+                "solution": "由图可得。",
+                "knowledge_codes": ["algebra-operations"],
+                "target_causes": ["knowledge_gap"],
+            }],
+            "透明图审核预览测试", None, "User-Provided-Authorized", False,
+        )
+        out_dir = self.root / "audit-png-work"
+        result = notebook.prepare_audit_batch(
+            self.conn, "透明图审核预览测试", 5, out_dir, "unit-test", False
+        )
+        manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+        visual = manifest["items"][0]["visual_review_images"][0]
+        self.assertEqual(visual["status"], "opaque_preview")
+        with PILImage.open(visual["review_path"]) as preview:
+            self.assertEqual(preview.mode, "RGB")
+            self.assertGreaterEqual(min(preview.getpixel((0, 0))), 250)
+            self.assertLessEqual(max(preview.getpixel((8, 5))), 5)
+
     def test_simplified_verification_queue_uses_import_date(self):
         notebook.import_records(
             self.conn,

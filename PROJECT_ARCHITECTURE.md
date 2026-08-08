@@ -182,7 +182,7 @@ flowchart TD
 | 单题标注 | `annotate` | 修正题干/答案/解析/标签/难度/题型；内部验证质量门 |
 | 审核队列 | `audit-queue` | 精简列出未验证题，可按来源过滤；`--simplified-only` 只列自 2026-07-20 起入库的简化验证题 |
 | 审核包 | `audit-item` | 汇总一题的内容、来源、问题、近重复项、审核要求和 `verification_mode` |
-| 审核脚手架 | `prepare-audit-batch` | 生成逐题审核包和 verdict=pending 的审核 JSON，不修改数据库；支持 `--simplified-only` |
+| 审核脚手架 | `prepare-audit-batch` | 生成逐题审核包和 verdict=pending 的审核 JSON，不修改数据库；支持 `--simplified-only`；原始题图保持不变，透明 PNG 仅在审核工作目录生成白底预览，并通过 `visual_review_images.review_path` 提供给视觉审核 |
 | 精简审核扩展 | `prepare-review-batch` | 将模型逐题给出的精简决策扩展为完整审核 JSON，不替代数学判断、不写库 |
 | 结构化验证 | `verify-item` | 接受独立审核 JSON；逐题记录并在通过时提升状态 |
 | 批量提交审核 | `verify-review-batch` | 逐项复用 `verify-item` 质量门提交审核文件，只压缩命令输出，不批量放宽验证 |

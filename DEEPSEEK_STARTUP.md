@@ -12,12 +12,14 @@
 
 不得扫描、复制、合并、覆盖或改用其他同名数据库，不得直接 SQL 修改验证状态。
 
-## 2. 每次启动只运行两条命令
+## 2. 每次启动以 UTF-8 模式运行两条预检命令
 
 ```powershell
-python -B .agents\skills\math-error-notebook\scripts\notebook.py doctor --json
-python -B .agents\skills\math-error-notebook\scripts\notebook.py agent-context --task <任务> --json
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py doctor --json
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py agent-context --task <任务> --json
 ```
+
+读取项目文本统一写成 `Get-Content -Raw -Encoding UTF8 <path>`；不要先按系统默认编码读取再猜测重试。本项目不依赖 PowerShell 脚本执行策略或用户级 Profile。
 
 `<任务>` 只能是：
 

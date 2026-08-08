@@ -300,6 +300,7 @@ math-error-notebook/
 ├─ AGENTS.md                         项目硬规则
 ├─ DEEPSEEK_STARTUP.md               外部模型启动交接
 ├─ PROJECT_ARCHITECTURE.md           本文件：先查后建索引
+├─ .editorconfig / .gitattributes    UTF-8、换行和二进制文件规则
 ├─ .codex/rules.md                    旧版 Codex 兼容提示；不替代 AGENTS.md
 ├─ .agents/skills/math-error-notebook/
 │  ├─ SKILL.md                       智能体工作流
@@ -346,9 +347,11 @@ math-error-notebook/
 常规任务不再人工拼接预检、审核包或交接摘要。先运行：
 
 ```powershell
-python -B .agents\skills\math-error-notebook\scripts\notebook.py doctor --json
-python -B .agents\skills\math-error-notebook\scripts\notebook.py agent-context --task <task> --json
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py doctor --json
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py agent-context --task <task> --json
 ```
+
+PowerShell 读取项目文本必须显式使用 `Get-Content -Encoding UTF8`，Python 入口使用 `-X utf8`。`doctor.text_encoding` 会报告固定命令及关键项目文本能否按 UTF-8 解码，避免乱码后再猜测编码；不依赖可能被系统执行策略拦截的 PowerShell Profile 或启动脚本。
 
 固定流程：
 

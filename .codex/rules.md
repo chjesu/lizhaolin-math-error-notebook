@@ -2,4 +2,6 @@
 
 Codex 的项目级持久指令位于项目根目录的 `AGENTS.md`。本文件只保留为旧版本兼容提示，不作为主要规则来源。
 
+Windows PowerShell 使用 `Get-Content -Encoding UTF8`，Python 使用 `-X utf8`；项目文本始终按 UTF-8 读取。
+
 使用项目级 `.agents/skills/math-error-notebook/` 完成照片批改、错因保存、题库检索、针对性推荐和复习追踪。Skill 使用当前模型的图片输入能力，不宣称在回复中自动切换模型或供应商。

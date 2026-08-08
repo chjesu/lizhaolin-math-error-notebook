@@ -677,6 +677,7 @@ class NotebookTests(unittest.TestCase):
             self.conn, self.db, ROOT, "verify"
         )
         self.assertEqual(context["task"], "verify")
+        self.assertTrue(any("UTF-8" in rule for rule in context["critical_rules"]))
         self.assertIn("required_reference", context)
         self.assertIn("prepare-audit-batch", " ".join(context["commands"]))
         self.assertEqual(
@@ -688,6 +689,13 @@ class NotebookTests(unittest.TestCase):
         self.assertIn("simplified_eligible", handoff["verification_workload"])
         self.assertLessEqual(len(handoff["top_pending_sources"]), 5)
         self.assertEqual(handoff["defaults"], {"answers": False, "print": False})
+        health = notebook.doctor(self.conn, self.db, ROOT)
+        self.assertTrue(health["checks"]["utf8_project_files"])
+        self.assertEqual(health["text_encoding"]["policy"], "UTF-8")
+        self.assertEqual(
+            health["text_encoding"]["powershell_read_command"],
+            "Get-Content -Raw -Encoding UTF8 <path>",
+        )
 
     def test_verification_requires_all_review_checks(self):
         notebook.import_records(

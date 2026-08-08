@@ -2271,6 +2271,31 @@ def _find_soffice() -> Path | None:
     return next((path for path in candidates if path.is_file()), None)
 
 
+def _utf8_project_status(project_root: Path) -> dict[str, Any]:
+    """Check the small set of startup files that every agent may read."""
+    paths = (
+        project_root / "AGENTS.md",
+        project_root / "DEEPSEEK_STARTUP.md",
+        project_root / "PROJECT_ARCHITECTURE.md",
+        project_root / ".editorconfig",
+        project_root / ".gitattributes",
+    )
+    invalid: list[str] = []
+    for path in paths:
+        try:
+            path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeDecodeError):
+            invalid.append(str(path.relative_to(project_root)))
+    return {
+        "policy": "UTF-8",
+        "project_files_valid": not invalid,
+        "invalid_files": invalid,
+        "powershell_read_command": "Get-Content -Raw -Encoding UTF8 <path>",
+        "python_command_prefix": "python -X utf8 -B",
+        "python_stdout": getattr(sys.stdout, "encoding", None),
+    }
+
+
 def _git_summary(project_root: Path) -> dict[str, Any]:
     command = [
         "git", "-c", f"safe.directory={project_root.resolve()}",
@@ -2309,6 +2334,8 @@ def doctor(
         project_root / ".agents" / "skills" / "math-error-notebook" / "assets" / "question-review-template.json",
         project_root / "requirements-ocr.txt",
         project_root / "requirements-paddleocr.txt",
+        project_root / ".editorconfig",
+        project_root / ".gitattributes",
     )
     runtime = project_root / "runtime" / "pdf"
     added_runtime = False
@@ -2324,12 +2351,14 @@ def doctor(
         if added_runtime:
             sys.path.remove(str(runtime))
     config = _read_project_config(project_root)
+    encoding_status = _utf8_project_status(project_root)
     checks = {
         "canonical_database": Path(info["canonical_path"]) == DEFAULT_DB.resolve(),
         "integrity": info["integrity_check"] == "ok",
         "foreign_keys": info["foreign_key_violations"] == 0,
         "schema": str(info["schema_version"]) == str(SCHEMA_VERSION),
         "required_project_files": all(path.is_file() for path in required),
+        "utf8_project_files": encoding_status["project_files_valid"],
     }
     warnings: list[str] = []
     missing_pdf = [name for name, available in pdf_dependencies.items() if not available]
@@ -2371,6 +2400,7 @@ def doctor(
         "pdf_dependencies": pdf_dependencies,
         "ocr_runtime": ocr_runtime,
         "formula_ocr_runtime": formula_ocr_runtime,
+        "text_encoding": encoding_status,
         "printer": config.get("printer_name"),
         "libreoffice": str(_find_soffice()) if _find_soffice() else None,
     }
@@ -2498,6 +2528,7 @@ def agent_context(
             "unverified": health["bank"]["unverified"],
         },
         "critical_rules": [
+            "use UTF-8 only: pass -Encoding UTF8 to PowerShell text reads and -X utf8 to Python",
             "use only data/math_notebook.db through notebook.py",
             "never verify from source reputation, external verified, sampling, or bulk SQL",
             "recommend only verified questions and review relevance before save",

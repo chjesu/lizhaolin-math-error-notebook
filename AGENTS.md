@@ -1,5 +1,6 @@
 # 李兆霖数学错题本项目规则
 
+- 项目文本编码固定为 UTF-8。Windows PowerShell 读取文本必须显式使用 `Get-Content -Encoding UTF8`，不得先按系统默认编码读取再猜测重试；Python 启动命令使用 `python -X utf8 -B`，文件读写显式指定 `encoding="utf-8"` 或 `utf-8-sig`。禁止用无编码参数的重定向改写项目文本。
 - 通过 Codex++、DeepSeek 或其他外部模型运行时，先运行 `notebook.py doctor --json` 和与任务匹配的 `notebook.py agent-context --task <task> --json`；仅在预检失败或输出要求时读取 `DEEPSEEK_STARTUP.md`/专项参考。
 - 修改或新建功能前先查 `PROJECT_ARCHITECTURE.md`，优先扩展现有权威入口，禁止创建平行数据库层、推荐器、验证器或通用打印器。
 - 错题、题库、推荐和复习任务使用项目级 `math-error-notebook` Skill，并通过其脚本操作。

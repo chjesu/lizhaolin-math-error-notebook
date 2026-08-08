@@ -189,16 +189,54 @@ def clean_latex(value: str) -> str:
     return value.strip()
 
 
+OPTION_MARKER_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:[（(]\s*([A-D])\s*[）)]|([A-D])\s*[．.、])"
+)
+
+
+def _option_label(match: re.Match[str]) -> str:
+    return match.group(1) or match.group(2)
+
+
 def split_options(lines: list[str]) -> tuple[list[str], list[str]]:
-    option_text = " ".join(line for line in lines if re.search(r"(?:^|\s)[A-D]．", line))
-    remaining = [line for line in lines if not re.search(r"(?:^|\s)[A-D]．", line)]
-    if not option_text:
-        return [], remaining
-    matches = list(re.finditer(r"([A-D])．", option_text))
-    options = []
+    """Split A-D choices without discarding a stem prefix on the same line.
+
+    Downloaded exam DOCX files use several label styles (``A．``, ``A.``,
+    ``A、`` and ``（A）``).  The old implementation removed an entire paragraph
+    as soon as it contained one label, which silently truncated stems formatted
+    as ``question ... A. ... B. ...``.
+    """
+    labels: list[str] = []
+    for line in lines:
+        matches = list(OPTION_MARKER_RE.finditer(line))
+        if matches:
+            labels.extend(_option_label(match) for match in matches)
+
+    # Avoid treating an isolated geometric point such as "A．" as a choice.
+    # A valid choice block must begin with A and include at least B.
+    if not labels or labels[0] != "A" or "B" not in labels:
+        return [], list(lines)
+
+    option_chunks: list[str] = []
+    remaining: list[str] = []
+    for line in lines:
+        matches = list(OPTION_MARKER_RE.finditer(line))
+        if not matches:
+            remaining.append(line)
+            continue
+        prefix = line[: matches[0].start()].strip()
+        if prefix:
+            remaining.append(prefix)
+        option_chunks.append(line[matches[0].start() :].strip())
+
+    option_text = " ".join(option_chunks)
+    matches = list(OPTION_MARKER_RE.finditer(option_text))
+    options: list[str] = []
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(option_text)
-        options.append(match.group(1) + "．" + option_text[match.end():end].strip())
+        options.append(
+            _option_label(match) + "．" + option_text[match.end() : end].strip()
+        )
     return options, remaining
 
 

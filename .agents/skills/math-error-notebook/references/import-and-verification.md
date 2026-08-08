@@ -19,9 +19,16 @@ External questions remain unverified by default. An imported `verified` field is
 
 For a user-authorized date range of DOCX exams, reuse `scripts/import_recent_docx_batch.py`.
 It performs source/file idempotency checks and orchestrates the existing OMML extractor,
-builder, and `import-file`; it never verifies imported questions. Then run
+builder, pre-import quality gate, and `import-file`; it never verifies imported questions.
+The quality gate fails closed when question numbers are missing or duplicated, a question
+cannot be parsed, a real solution marker/body is absent, required fields are incomplete,
+math delimiters are unbalanced, or choice labels are malformed. A blocked paper is recorded
+as `blocked_quality_gate` with its problems and source paragraph ranges and is not written to
+the canonical database. Do not override that result; fix or re-extract the source. Then run
 `scripts/audit_recent_docx_batch.py` to build all item packets and route structural
-exceptions without consuming model context.
+exceptions without consuming model context. Image checks cover stems, options, answers, and
+solutions; diagram-dependent questions are routed to visual review rather than pure-text
+simplified approval.
 
 ## Two-stage compact audit workflow
 

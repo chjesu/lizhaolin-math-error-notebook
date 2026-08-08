@@ -20,6 +20,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOK = ROOT / ".agents" / "skills" / "math-error-notebook" / "scripts" / "notebook.py"
 BLOCKING_ISSUES = {
+    "diagram_reference",
     "missing_solution",
     "missing_tags",
     "missing_targets",
@@ -59,9 +60,13 @@ def safe_name(value: str) -> str:
 
 def image_problems(question: dict[str, Any]) -> list[str]:
     problems: list[str] = []
-    combined = "\n".join(
-        str(question.get(field) or "") for field in ("stem", "stored_solution")
-    )
+    option_text = "\n".join(str(item) for item in (question.get("options") or []))
+    combined = "\n".join([
+        str(question.get("stem") or ""),
+        str(question.get("stored_answer") or ""),
+        str(question.get("stored_solution") or ""),
+        option_text,
+    ])
     references = IMAGE_RE.findall(combined)
     if "如图" in combined and not references:
         problems.append("diagram_reference_without_local_image")

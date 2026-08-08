@@ -112,6 +112,27 @@ def recent_docx(directory: Path, start: date, end: date) -> list[Path]:
     )
 
 
+def validate_build_summary(summary: dict[str, Any]) -> list[str]:
+    """Fail closed before a malformed extraction can reach the canonical DB."""
+    problems = [str(item) for item in (summary.get("quality_gate") or {}).get("problems") or []]
+    questions = int(summary.get("questions") or 0)
+    if questions <= 0:
+        problems.append("no_questions_built")
+    if int(summary.get("with_answers") or 0) != questions:
+        problems.append("not_all_questions_have_answers")
+    if int(summary.get("with_solutions") or 0) != questions:
+        problems.append("not_all_questions_have_solutions")
+    if summary.get("skipped_questions"):
+        problems.append("builder_skipped_questions")
+    if summary.get("duplicate_question_numbers"):
+        problems.append("duplicate_question_numbers")
+    if summary.get("missing_question_numbers"):
+        problems.append("missing_question_numbers")
+    if not (summary.get("quality_gate") or {}).get("passed", False):
+        problems.append("builder_quality_gate_failed")
+    return sorted(set(problems))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("directory", type=Path)
@@ -135,6 +156,7 @@ def main() -> int:
     seen_content_hashes: dict[str, str] = {}
     records: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
+    blocked: list[dict[str, Any]] = []
     total_inserted = 0
     total_duplicates = 0
 
@@ -181,15 +203,36 @@ def main() -> int:
                 "--semester", str(infer_semester(name)),
                 "--source-year", infer_year(name),
             ])
+            quality_problems = validate_build_summary(build_summary)
             entry.update(
-                status="extracted" if not args.do_import else "ready_to_import",
+                status=(
+                    "blocked_quality_gate"
+                    if quality_problems
+                    else ("extracted" if not args.do_import else "ready_to_import")
+                ),
                 relative_dir=relative_dir,
                 grade=grade,
                 paragraphs=extract_summary["paragraphs"],
                 extracted_questions=build_summary["questions"],
                 with_answers=build_summary["with_answers"],
                 with_solutions=build_summary["with_solutions"],
+                detected_question_numbers=build_summary.get("detected_question_numbers") or [],
+                declared_question_count=build_summary.get("declared_question_count"),
+                missing_question_numbers=build_summary.get("missing_question_numbers") or [],
+                duplicate_question_numbers=build_summary.get("duplicate_question_numbers") or [],
+                skipped_questions=build_summary.get("skipped_questions") or [],
+                quality_gate=build_summary.get("quality_gate") or {},
             )
+            if quality_problems:
+                entry["quality_problems"] = quality_problems
+                blocked.append({
+                    "source_name": name,
+                    "relative_dir": relative_dir,
+                    "problems": quality_problems,
+                    "parse_summary": str((exam_dir / "parse_summary.json").resolve()),
+                })
+                records.append(entry)
+                continue
             if args.do_import:
                 imported = run_json([
                     sys.executable, "-B", str(NOTEBOOK), "import-file",
@@ -225,13 +268,15 @@ def main() -> int:
         "skipped_existing_sources": sum(row["status"] == "skipped_existing_source" for row in records),
         "skipped_duplicate_files": sum(row["status"] == "skipped_duplicate_file" for row in records),
         "failed_sources": len(failures),
+        "blocked_sources": len(blocked),
         "questions_inserted": total_inserted,
         "duplicate_questions": total_duplicates,
         "manifest": str(manifest_path.resolve()),
         "failures": failures,
+        "blocked": blocked,
     }
     print(json.dumps(summary, ensure_ascii=False, separators=(",", ":")))
-    return 1 if failures else 0
+    return 1 if failures or blocked else 0
 
 
 if __name__ == "__main__":

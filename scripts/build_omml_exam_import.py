@@ -14,6 +14,19 @@ from pathlib import Path
 from build_dongzhimen_review import clean_latex, split_options
 
 
+QUESTION_START_RE = re.compile(
+    r"^\s*(?:第\s*)?(\d{1,2})\s*(?:[．.](?!\d)|、|题(?:\s*[:：])?)"
+)
+SECTION_RE = re.compile(r"^[一二三四五六七八九十]+、")
+SECTION_COUNT_RE = re.compile(r"(?:本题)?共\s*(\d{1,2})\s*(?:小题|题)")
+FIELD_MARKER_RE = re.compile(
+    r"(?=【(?:答案|难度|知识点|分析|解析|详解|解答)】)"
+)
+SOLUTION_MARKERS = ("【分析】", "【解析】", "【详解】", "【解答】")
+METADATA_MARKERS = ("【难度】", "【知识点】")
+IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
+
+
 def infer_knowledge(text: str) -> list[str]:
     rules = [
         ("complex-numbers", ("复数", "共轭")),
@@ -89,23 +102,75 @@ def question_type(section: str, options: list[str]) -> str:
     return "解答题"
 
 
-def sectioned_segments(records: list[dict[str, object]]) -> list[tuple[int, str, list[str]]]:
+def normalize_field_lines(lines: list[str]) -> list[str]:
+    """Put site metadata markers on separate logical lines."""
+    normalized: list[str] = []
+    for line in lines:
+        parts = [part.strip() for part in FIELD_MARKER_RE.split(line) if part.strip()]
+        normalized.extend(parts)
+    return normalized
+
+
+def analyze_segments(
+    records: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    """Split questions and retain enough provenance to detect silent losses."""
     starts: list[tuple[int, int, str]] = []
     section = ""
+    declared_section_counts: list[int] = []
     for position, record in enumerate(records):
         text = str(record["text"]).strip()
-        if re.match(r"^[一二三四五六]、", text):
+        if SECTION_RE.match(text):
             section = text
-        match = re.match(r"^(\d+)．", text)
+            count_match = SECTION_COUNT_RE.search(text)
+            if count_match:
+                declared_section_counts.append(int(count_match.group(1)))
+        match = QUESTION_START_RE.match(text)
         if match:
             starts.append((position, int(match.group(1)), section))
-    result = []
+
+    segments: list[dict[str, object]] = []
     for index, (start, number, current_section) in enumerate(starts):
         end = starts[index + 1][0] if index + 1 < len(starts) else len(records)
-        lines = [str(records[pos]["text"]).strip() for pos in range(start, end) if str(records[pos]["text"]).strip()]
-        lines = [line for line in lines if not re.match(r"^[一二三四五六]、", line)]
-        result.append((number, current_section, lines))
-    return result
+        lines = [
+            str(records[pos]["text"]).strip()
+            for pos in range(start, end)
+            if str(records[pos]["text"]).strip()
+        ]
+        lines = [line for line in lines if not SECTION_RE.match(line)]
+        segments.append({
+            "number": number,
+            "section": current_section,
+            "lines": normalize_field_lines(lines),
+            "record_start": int(records[start].get("index", start)),
+            "record_end": int(records[end - 1].get("index", end - 1)),
+        })
+
+    numbers = [number for _, number, _ in starts]
+    duplicate_numbers = sorted(
+        number for number in set(numbers) if numbers.count(number) > 1
+    )
+    number_gaps = (
+        sorted(set(range(1, max(numbers) + 1)) - set(numbers)) if numbers else []
+    )
+    diagnostics: dict[str, object] = {
+        "detected_question_numbers": numbers,
+        "duplicate_question_numbers": duplicate_numbers,
+        "missing_question_numbers": number_gaps,
+        "leading_unassigned_records": starts[0][0] if starts else len(records),
+        "detected_segments": len(segments),
+        "declared_question_count": sum(declared_section_counts) or None,
+    }
+    return segments, diagnostics
+
+
+def sectioned_segments(records: list[dict[str, object]]) -> list[tuple[int, str, list[str]]]:
+    """Compatibility view used by older callers and tests."""
+    segments, _ = analyze_segments(records)
+    return [
+        (int(segment["number"]), str(segment["section"]), list(segment["lines"]))
+        for segment in segments
+    ]
 
 
 def localize_images(value: str, batch_name: str, relative_dir: str) -> str:
@@ -126,25 +191,60 @@ def parse_question(
     semester: int,
     source_year: str,
 ) -> dict[str, object]:
-    answer_index = next(i for i, line in enumerate(lines) if line.startswith("【答案】"))
-    difficulty_index = next((i for i, line in enumerate(lines) if line.startswith("【难度】")), None)
-    answer_end = difficulty_index if difficulty_index is not None else next(
-        (i for i, line in enumerate(lines[answer_index + 1 :], answer_index + 1) if line.startswith(("【知识点】", "【分析】", "【解析】", "【详解】"))),
-        len(lines),
+    lines = normalize_field_lines(lines)
+    answer_index = next(
+        (i for i, line in enumerate(lines) if line.startswith("【答案】")), None
     )
+    if answer_index is None:
+        raise ValueError("missing answer marker")
     solution_start = next(
-        (i for i, line in enumerate(lines[answer_end:], answer_end) if line.startswith(("【分析】", "【解析】", "【详解】"))),
-        answer_end,
+        (
+            i
+            for i, line in enumerate(lines[answer_index + 1 :], answer_index + 1)
+            if line.startswith(SOLUTION_MARKERS)
+        ),
+        None,
+    )
+    if solution_start is None:
+        raise ValueError("missing solution marker")
+    answer_end = next(
+        (
+            i
+            for i, line in enumerate(lines[answer_index + 1 :], answer_index + 1)
+            if line.startswith((*METADATA_MARKERS, *SOLUTION_MARKERS))
+        ),
+        solution_start,
     )
     options, stem_lines = split_options(lines[:answer_index])
-    stem_lines[0] = re.sub(r"^\d+．", "", stem_lines[0]).strip()
+    if not stem_lines:
+        raise ValueError("empty stem after option splitting")
+    stem_lines[0] = QUESTION_START_RE.sub("", stem_lines[0], count=1).strip()
     stem = localize_images(clean_latex("\n".join(stem_lines)), batch_name, relative_dir)
     answer_lines = [lines[answer_index].removeprefix("【答案】").strip(), *lines[answer_index + 1 : answer_end]]
-    answer = clean_latex("\n".join(line for line in answer_lines if line))
-    solution_lines = [*answer_lines, *lines[solution_start:]]
+    answer = localize_images(
+        clean_latex("\n".join(line for line in answer_lines if line)),
+        batch_name,
+        relative_dir,
+    )
+    first_solution = lines[solution_start]
+    for marker in SOLUTION_MARKERS:
+        if first_solution.startswith(marker):
+            first_solution = first_solution.removeprefix(marker).strip()
+            break
+    solution_lines = [first_solution, *lines[solution_start + 1 :]]
     solution = localize_images(clean_latex("\n".join(line for line in solution_lines if line)), batch_name, relative_dir)
-    metadata_start = (difficulty_index + 1) if difficulty_index is not None else answer_end
-    knowledge_text = " ".join(lines[metadata_start:solution_start])
+    if len(stem) < 8:
+        raise ValueError("stem too short")
+    if not answer:
+        raise ValueError("answer is empty")
+    if len(solution) < 8:
+        raise ValueError("solution body missing or too short")
+    difficulty_index = next(
+        (i for i, line in enumerate(lines) if line.startswith("【难度】")), None
+    )
+    knowledge_text = " ".join(
+        line for line in lines[answer_end:solution_start] if line.startswith(METADATA_MARKERS)
+    )
     knowledge = infer_knowledge(knowledge_text + " " + stem)
     difficulty_match = re.search(r"([0-9.]+)", lines[difficulty_index]) if difficulty_index is not None else None
     difficulty = convert_difficulty(float(difficulty_match.group(1))) if difficulty_match else 3.0
@@ -162,10 +262,63 @@ def parse_question(
         "source_year": source_year,
         "source_question_no": number,
         "verified": False,
+        "source_section": section,
     }
     if options:
         record["options"] = [clean_latex(option) for option in options]
     return record
+
+
+def build_quality_problems(
+    diagnostics: dict[str, object],
+    questions: list[dict[str, object]],
+    skipped: list[dict[str, object]],
+    image_root: Path | None = None,
+) -> list[str]:
+    problems: list[str] = []
+    if not diagnostics.get("detected_segments"):
+        problems.append("no_question_boundaries_detected")
+    if diagnostics.get("duplicate_question_numbers"):
+        problems.append("duplicate_question_numbers")
+    if diagnostics.get("missing_question_numbers"):
+        problems.append("missing_question_numbers")
+    if skipped:
+        problems.append("question_parse_failures")
+    if len(questions) != int(diagnostics.get("detected_segments") or 0):
+        problems.append("parsed_question_count_mismatch")
+    declared_count = diagnostics.get("declared_question_count")
+    if declared_count and int(declared_count) != int(diagnostics.get("detected_segments") or 0):
+        problems.append("declared_question_count_mismatch")
+    for question in questions:
+        qid = str(question.get("id") or "unknown")
+        for field in ("stem", "answer", "solution"):
+            value = str(question.get(field) or "")
+            if not value.strip():
+                problems.append(f"{qid}:missing_{field}")
+            if value.count("$") % 2:
+                problems.append(f"{qid}:unbalanced_math_delimiter:{field}")
+        options = question.get("options")
+        if "选择" in str(question.get("source_section") or "") and not options:
+            problems.append(f"{qid}:missing_choice_options")
+        if options:
+            labels = [str(option).split("．", 1)[0] for option in options]
+            if labels != ["A", "B", "C", "D"]:
+                problems.append(f"{qid}:invalid_choice_labels")
+        image_text = "\n".join([
+            str(question.get("stem") or ""),
+            str(question.get("answer") or ""),
+            str(question.get("solution") or ""),
+            "\n".join(str(option) for option in (options or [])),
+        ])
+        if "[IMAGE:" in image_text:
+            problems.append(f"{qid}:unlocalized_image_marker")
+        if image_root is not None:
+            for reference in IMAGE_RE.findall(image_text):
+                path_text = reference.strip().strip("<>").split(maxsplit=1)[0]
+                image_path = image_root / Path(path_text).name
+                if not image_path.is_file():
+                    problems.append(f"{qid}:missing_image:{path_text}")
+    return sorted(set(problems))
 
 
 def main() -> None:
@@ -178,25 +331,41 @@ def main() -> None:
     parser.add_argument("--source-year", default="2025-2026")
     args = parser.parse_args()
     records = json.loads((args.exam_dir / "omml_extract.json").read_text(encoding="utf-8"))
-    questions = []
-    skipped = 0
-    for number, section, lines in sectioned_segments(records):
+    questions: list[dict[str, object]] = []
+    skipped: list[dict[str, object]] = []
+    segments, diagnostics = analyze_segments(records)
+    for segment in segments:
+        number = int(segment["number"])
+        section = str(segment["section"])
+        lines = list(segment["lines"])
         try:
             q = parse_question(number, section, lines, args.relative_dir, args.batch_name, args.grade, args.semester, args.source_year)
+            q["source_paragraph_start"] = segment["record_start"]
+            q["source_paragraph_end"] = segment["record_end"]
             questions.append(q)
-        except (StopIteration, ValueError, KeyError) as e:
-            import sys
-            print(f'Skipping Q{number} ({section[:30]}): {e}', file=sys.stderr)
-            skipped += 1
-    if skipped:
-        print(f'Skipped {skipped} non-question entries', file=sys.stderr)
+        except (IndexError, StopIteration, TypeError, ValueError, KeyError) as exc:
+            skipped.append({
+                "question_number": number,
+                "record_start": segment["record_start"],
+                "record_end": segment["record_end"],
+                "reason": str(exc) or type(exc).__name__,
+            })
     output = args.exam_dir / "questions.jsonl"
     output.write_text("".join(json.dumps(question, ensure_ascii=False) + "\n" for question in questions), encoding="utf-8")
+    quality_problems = build_quality_problems(
+        diagnostics, questions, skipped, args.exam_dir / "media"
+    )
     summary = {
         "questions": len(questions),
         "with_options": sum("options" in question for question in questions),
         "with_answers": sum(bool(question["answer"]) for question in questions),
         "with_solutions": sum(bool(question["solution"]) for question in questions),
+        **diagnostics,
+        "skipped_questions": skipped,
+        "quality_gate": {
+            "passed": not quality_problems,
+            "problems": quality_problems,
+        },
         "output": str(output),
     }
     (args.exam_dir / "parse_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")

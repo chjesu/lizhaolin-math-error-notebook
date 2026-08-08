@@ -79,7 +79,9 @@ flowchart TD
 flowchart TD
     SRC["用户授权/开放/官方公开源"] --> X["提取：DOCX OMML / PDF 文本"]
     X --> C["转换为 JSON/JSONL；保留来源与原始记录"]
-    C --> IMP["import-file / import-url"]
+    C --> QG{"入库前质量门：题号连续、无解析失败、题干/答案/解析完整、选项结构合法"}
+    QG -->|"通过"| IMP["import-file / import-url"]
+    QG -->|"不通过"| HOLD["blocked_quality_gate：保留问题清单和原段落范围，不写主库"]
     IMP --> UV[("questions.verified = 0")]
     UV --> AQ["audit-summary / audit-queue"]
     AQ --> AI["audit-item：单题审核包"]
@@ -206,7 +208,9 @@ python -B .agents\skills\math-error-notebook\scripts\practice_sheet.py <error-id
 | 脚本 | 类型 | 作用 | 新任务使用规则 |
 |---|---|---|---|
 | `scripts/extract_docx_omml.py` | 通用、只读提取 | 直接读取 OOXML，将微软 OMML 公式转为 LaTeX，导出段落 JSON/Markdown/媒体 | DOCX 精确公式提取首选 |
-| `scripts/build_omml_exam_import.py` | 通用批次转换 | 分题、选项/答案/解析配对、图片本地化、初步知识点/难度，输出未验证 JSONL | 与上一脚本配套；导入后仍逐题验证 |
+| `scripts/build_omml_exam_import.py` | 通用批次转换 | 兼容常见题号/选项标记，分题并保留原段落范围，配对答案/真实解析，输出未验证 JSONL 与缺题、重号、解析失败等质量报告 | 与上一脚本配套；质量门通过后才可导入，导入后仍逐题验证 |
+| `scripts/import_recent_docx_batch.py` | 日期批次编排 | 去重后调用 OMML 提取与构建，并在 `import-file` 前检查题号连续性、解析失败、字段完整性和选项结构 | 任一异常标记 `blocked_quality_gate` 并停止该卷入库；不得绕过 |
+| `scripts/audit_recent_docx_batch.py` | 入库后结构审核 | 构建逐题审核包，检查字段、标签、来源和题干/答案/解析/选项中的全部图片引用 | 图形依赖题必须转视觉复核，不得直接走纯文本简化通过 |
 | `scripts/docx_extractor.py` | 实验性一体提取 | 基于 python-docx/lxml 解析 OMML、题目、答案和解析，支持预览/JSONL | 与前两者能力重叠；未完成统一代码映射，未经回归测试不要作为主流程 |
 | `scripts/_test_extract.py` | 临时烟雾测试 | 预览 `docx_extractor.py` 前 5 题 | 不是生产入口 |
 | `scripts/extract_pdf_text.py` | 通用、只读 | 使用 pypdf 提取分页文本供源文件审核 | 文本型 PDF 使用；扫描 PDF 仍需图像/OCR复核 |
@@ -327,7 +331,7 @@ math-error-notebook/
 | 推荐同类题 | `recommend`、`assign-recommendations` | 新推荐器或直接 SQL |
 | 输出/打印练习 | `practice_sheet.py` | 新通用 PDF 生成器 |
 | 导入 JSON/CSV | `import-file` | 新数据库导入器 |
-| 导入 DOCX | `extract_docx_omml.py` + `build_omml_exam_import.py` + `import-file`；日期批次用 `scripts/import_recent_docx_batch.py` 编排 | 第三套 OMML 转换器 |
+| 导入 DOCX | `extract_docx_omml.py` + `build_omml_exam_import.py` + 入库前质量门 + `import-file`；日期批次用 `scripts/import_recent_docx_batch.py` 编排 | 第三套 OMML 转换器，或绕过 `blocked_quality_gate` |
 | 审核未验证题 | `prepare-audit-batch` + `verify-item`；已完成人工审核的清单可用 `verify-review-batch` | 批量 verified 更新脚本 |
 | DOCX 结构预检 | `scripts/audit_recent_docx_batch.py` | 让模型重复检查字段、图片路径和格式 |
 | 修复题目字段 | `annotate` 或审核 JSON 的 correction | 直接 UPDATE SQL |

@@ -55,7 +55,47 @@ python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py agent-c
 脚本负责格式校验、事务、检索、去重提示、审核脚手架、PDF 和状态汇总；模型仍负责图像理解、第一处实质性错误、数学推导、答案/解析审核和推荐相关性判断。
 新接入模型先按任务调用 `behavior-cases --category grade|verify|recommend --json`；只在需要时读取单个完整案例，避免反复加载长规则。
 
-## 5. 不变量
+## 5. DeepSeek 无视觉能力时的照片判题流程
+
+项目已经提供两级本地 OCR，OCR 在本机运行，DeepSeek 只读取精简 JSON：
+
+- RapidOCR：方向校正、印刷题目正文、题库编号、预览和疑难裁剪。
+- PaddleOCR FormulaNet：对疑难小裁剪生成数学公式 LaTeX 候选。
+
+先运行：
+
+```powershell
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-preflight <图片路径> --formula-ocr auto --json
+```
+
+日常判题直接读取命令返回的精简 `ocr_pages`、`question_ids`、预览路径和裁剪选择器，不要再次读取完整 `ocr-packet.json`。如果识别到题库编号，优先读取主库中的标准原题：
+
+```powershell
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py question <题库编号> --compact --json
+```
+
+随后按以下质量门分流：
+
+1. **可由 DeepSeek 继续判定**：印刷题干清晰；或已由题库编号取得标准原题；学生答案是无歧义的选择、数字或短文本；OCR 各处内容彼此一致；题意不依赖图形。
+2. **必须标记 `requires_visual_confirmation` 并停止保存**：关键公式、负号、指数、分母、等号或定义域置信度不足；连续手写推导；坐标图、几何图、辅助线；圈选不清；涂改或手写覆盖印刷文字；OCR 与题库原文或不同 OCR 候选冲突。
+3. FormulaNet 输出只是**不可信的 LaTeX 定位候选**。未经视觉复核，不得把它当作原题、学生步骤、答案或判错依据。
+4. OCR 不能替代数学审核。通过质量门后，DeepSeek 仍须完成逐题判定、首个实质错误定位和正确推导；不能确认的内容使用 `unclear`，不得补造。
+5. 只要存在 `requires_visual_confirmation`，不得执行 `grade-commit`，也不得保存错题或给出确定的对错结论；应请求清晰局部图、用户提供文字版答案，或交给具备视觉能力的智能体复核。
+
+推荐执行链：
+
+```text
+照片
+  → photo-preflight（本地 RapidOCR + 可选 FormulaNet）
+  → 识别到题库编号时读取 question --compact
+  → DeepSeek 可判定性质量门
+      → 安全题：数学推理 → grade-preview → grade-commit
+      → 疑难题：requires_visual_confirmation → 停止保存并请求视觉复核
+```
+
+这套流程的目标是减少图片直接输入 Token，而不是降低判题证据标准。
+
+## 6. 不变量
 
 - 推荐只使用 `verified=1`，必须显示来源和理由。
 - 外部 `verified`、来源信誉、抽样和批量 SQL 不能替代逐题审核。

@@ -115,9 +115,14 @@ def check_one(item: dict[str, Any]) -> dict[str, Any]:
     kind = str(item.get("kind") or "")
     symbols = _symbols(item)
     if kind == "identity":
-        delta = sp.trigsimp(
+        # ``trigsimp`` handles the trigonometric cases this helper was first
+        # built for, but it intentionally does not always expand or cancel
+        # ordinary polynomial/rational expressions.  Finish with the general
+        # simplifier so exact algebraic identities do not become false
+        # ``fail`` results that have to be sent back to a model.
+        delta = sp.simplify(sp.trigsimp(
             _sympify(item["left"], symbols) - _sympify(item["right"], symbols)
-        )
+        ))
         return {"status": "pass" if delta == 0 else "fail", "evidence": str(delta)}
     if kind == "equation":
         variable = item.get("variable") or (item.get("variables") or [None])[0]

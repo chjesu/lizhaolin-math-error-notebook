@@ -61,6 +61,33 @@ class SymbolicPrecheckTests(unittest.TestCase):
         self.assertTrue(result["human_or_model_review_required"])
         self.assertEqual(len(result["checks"]), 1)
 
+    def test_algebraic_identity_expands_and_cancels(self):
+        result = symbolic_precheck.run_packet(
+            {
+                "checks": [
+                    {
+                        "id": "polynomial",
+                        "kind": "identity",
+                        "variables": ["x"],
+                        "left": "(1-2*x)**3",
+                        "right": "1-6*x+12*x**2-8*x**3",
+                    },
+                    {
+                        "id": "rational",
+                        "kind": "identity",
+                        "variables": ["k"],
+                        "left": "((-16*k**2-8*k)/(4*k**2+3)+4) / "
+                        "(2*(-16*k**2-8*k)/(4*k**2+3)+4+"
+                        "(16*k**2+16*k-8)/(4*k**2+3))",
+                        "right": "3-2*k",
+                    },
+                ]
+            }
+        )
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["counts"], {"pass": 2, "fail": 0, "unknown": 0})
+        self.assertEqual(result["checks"], [])
+
     def test_unsafe_or_unrecognized_expression_is_unknown(self):
         result = symbolic_precheck.run_packet(
             {

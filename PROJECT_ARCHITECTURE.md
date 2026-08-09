@@ -164,13 +164,14 @@ flowchart TD
 | 来源查询 | `sources` | 精简列出来源及题目/已验证数量，供批量导入幂等判断 |
 | 错题保存 | `record-error` | 保存结构化错因、图片、知识点和复习周期 |
 | 错题预检/保存 | `grade-preview` / `grade-commit` | 写库前验证错因 JSON；粗心必须有直接证据；提交复用同一质量门 |
-| 错题撤销 | `delete-error` | 删除误保存的错题及受控派生文件 |
+| 错题撤销 | `delete-error` | 删除误保存的错题及受控派生文件；有历史作答时须显式 `--detach-attempts`，保留作答但解除错题关联 |
 | 推荐预览/保存 | `recommend` | 按知识点、错因、难度、作答史、关键词和结构特征排序已验证题 |
 | 推荐审核包 | `recommend-packet` | 本地完成关键词拆分、占位题过滤和排序，默认写入不含答案/长解析的精简审核包；同一审核包复核后可直接交给 `assign-recommendations` |
 | 人工推荐 | `assign-recommendations` | 用模型逐题复核后的已验证题替换自动候选 |
 | 复习到期 | `due` | 查询到期或逾期复习任务 |
 | 每日复习包 | `daily-review-packet` | 每个活动错题合并为一个任务，只带已复核且已验证的推荐题 |
 | 复习反馈 | `review` | 记录 correct/partial/wrong，并在失败时启动新周期 |
+| 复习更正 | `correct-review` | 原位更正最近一次误判，并恢复或重建对应复习周期；不重复推进阶段 |
 | 作答记录 | `attempt` | 保存推荐题对错、答案和新的错因 |
 | 作答更正 | `correct-attempt` | 原位更正误判的 attempt，并同步推荐状态；不重复计数 |
 | 检索 | `search` | 按知识点、年级、难度、文本、验证状态精简检索；适合的文本查询自动使用主库内 FTS5 |
@@ -199,7 +200,7 @@ flowchart TD
 - 数据库与标识：`default_database_path`、`connect`、`init_database`、`fingerprint`、`slug_id`、`bank_info`
 - 题目标准化：`infer_knowledge`、`infer_question_features`、`validate_feature_codes`、`normalize_difficulty`、`normalize_question`、`insert_question`
 - 导入与来源：`import_records`、`read_json_records`、`fetch_json`、`register_exam_directory`、`sync_source_manifest`、`update_source_metadata`、`list_sources`
-- 错题与复习：`create_review_cycle`、`render_error_markdown`、`validate_error_analysis`、`record_error`、`fetch_error`、`delete_error`、`review_due`、`daily_review_packet`、`mark_review`、`record_attempt`
+- 错题与复习：`create_review_cycle`、`render_error_markdown`、`validate_error_analysis`、`record_error`、`fetch_error`、`delete_error`、`review_due`、`daily_review_packet`、`mark_review`、`correct_review`、`record_attempt`
 - 推荐：`compact_recommendations`、`question_feature_codes`、`backfill_question_features`、`error_feature_codes`、`recommend`、`recommendation_packet`、`assign_recommendations`
 - 检索与统计：`stats`、`coverage`、`list_knowledge_points`、`list_cause_codes`、`list_feature_codes`、`question_detail`、`search_questions`、`search_index_status`、`rebuild_search_index`
 - 审核与修复：`annotate_question`、`question_issue_codes`、`near_duplicate_candidates`、`audit_item`、`prepare_audit_batch`、`prepare_verification_reviews`、`apply_verification_review`、`apply_verification_review_batch`、`repair_embedded_options`、`audit_queue`、`audit_summary`
@@ -368,7 +369,7 @@ math-error-notebook/
 | 修复题目字段 | `annotate` 或审核 JSON 的 correction | 直接 UPDATE SQL |
 | 查询题库状态 | `bank-info`、`audit-summary`、`coverage`、`stats` | 递归扫描和临时报表脚本 |
 | 分析其他数据库 | `audit_deepseek_db.py` 只读报告 | 自动合库程序 |
-| 记录练习结果 | `attempt`、`review` | 独立成绩文件 |
+| 记录练习结果 | `attempt`、`review`；误判更正用 `correct-attempt`、`correct-review` | 独立成绩文件或重复记录 |
 
 只有以下情况适合增加代码：现有入口确实无法表达需求；功能可重复使用；不会绕过质量门；明确归属到现有模块；同时增加回归测试和本文索引。
 

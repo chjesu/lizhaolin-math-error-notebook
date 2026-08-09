@@ -72,6 +72,50 @@ class NotebookTests(unittest.TestCase):
         self.assertTrue(all(item["question_id"] for item in items))
         self.assertEqual(len(list((self.root / "practice").glob("*.md"))), 1)
 
+    def test_delete_error_can_preserve_and_detach_attempts(self):
+        error_id = self.create_error()
+        question_id = notebook.recommend(self.conn, error_id, 1, False, self.root)[0][
+            "question_id"
+        ]
+        self.conn.execute(
+            """INSERT INTO attempts(
+                   id,question_id,error_id,submitted_answer,is_correct,
+                   cause_code,attempted_at,note
+               ) VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                "ATT-delete-error-detach",
+                question_id,
+                error_id,
+                "7/25",
+                1,
+                None,
+                notebook.now_iso(),
+                "keep attempt history",
+            ),
+        )
+        self.conn.commit()
+
+        with self.assertRaisesRegex(ValueError, "recorded practice attempts"):
+            notebook.delete_error(self.conn, error_id, self.root)
+
+        result = notebook.delete_error(
+            self.conn, error_id, self.root, detach_attempts=True
+        )
+        self.assertTrue(result["deleted"])
+        self.assertEqual(result["detached_attempts"], 1)
+        attempt = self.conn.execute(
+            "SELECT error_id,note FROM attempts WHERE id=?",
+            ("ATT-delete-error-detach",),
+        ).fetchone()
+        self.assertIsNone(attempt["error_id"])
+        self.assertIn("Detached from deleted error", attempt["note"])
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM errors WHERE id=?", (error_id,)
+            ).fetchone()[0],
+            0,
+        )
+
     def test_grade_preview_validates_without_writing(self):
         analysis = {
             "problem_text": r"求 $f(x)=x^2$ 的导数。",
@@ -406,6 +450,44 @@ class NotebookTests(unittest.TestCase):
             "SELECT MAX(cycle) FROM review_schedule WHERE error_id=?", (error_id,)
         ).fetchone()[0]
         self.assertEqual(cycle, 2)
+
+    def test_correct_review_restores_original_schedule_without_duplication(self):
+        error_id = self.create_error()
+        base = date(2026, 8, 8)
+        original_due_dates = [
+            row["due_date"]
+            for row in self.conn.execute(
+                "SELECT due_date FROM review_schedule WHERE error_id=? ORDER BY cycle,stage",
+                (error_id,),
+            ).fetchall()
+        ]
+        notebook.mark_review(self.conn, error_id, "partial", "initial grading", base)
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT MAX(cycle) FROM review_schedule WHERE error_id=?", (error_id,)
+            ).fetchone()[0],
+            2,
+        )
+
+        result = notebook.correct_review(
+            self.conn, error_id, "correct", "visual recheck", base
+        )
+
+        self.assertEqual(result["previous_result"], "partial")
+        self.assertEqual(result["result"], "correct")
+        rows = self.conn.execute(
+            """SELECT cycle,stage,due_date,result,completed_at
+               FROM review_schedule WHERE error_id=? ORDER BY cycle,stage""",
+            (error_id,),
+        ).fetchall()
+        self.assertEqual([row["cycle"] for row in rows], [1] * len(notebook.REVIEW_INTERVALS))
+        self.assertEqual(rows[0]["result"], "correct")
+        self.assertIsNotNone(rows[0]["completed_at"])
+        self.assertTrue(all(row["completed_at"] is None for row in rows[1:]))
+        self.assertEqual(
+            [row["due_date"] for row in rows],
+            original_due_dates,
+        )
 
     def test_verified_bank_and_coverage(self):
         summary = notebook.stats(self.conn)

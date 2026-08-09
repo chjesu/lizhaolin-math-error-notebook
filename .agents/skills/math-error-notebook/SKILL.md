@@ -97,7 +97,7 @@ Read `references/import-and-verification.md` only for question import, source re
 
 ## Review and progress
 
-Use `daily-review-packet --limit 12 --out <packet.json> --json` to collapse accumulated schedules into one task per active error. Only saved, reviewed, verified recommendations enter its printable section; resolve any reported recommendation gaps before PDF generation. Generate one questions-only review PDF with `practice_sheet.py --daily-packet <packet.json>`. Use `due --json`, `review <error-id> --result correct|partial|wrong`, `stats --json`, and `coverage --json`. Wrong/partial review starts an adaptive cycle.
+Use `daily-review-packet --limit 12 --out <packet.json> --json` to collapse accumulated schedules into one task per active error. Only saved, reviewed, verified recommendations enter its printable section; resolve any reported recommendation gaps before PDF generation. Generate one questions-only review PDF with `practice_sheet.py --daily-packet <packet.json>`. Use `due --json`, `review <error-id> --result correct|partial|wrong`, `stats --json`, and `coverage --json`. Wrong/partial review starts an adaptive cycle. If the latest review itself was misgraded, use `correct-review <error-id> --result correct|partial|wrong`; it corrects that row and repairs the schedule instead of advancing a second stage.
 
 ## Local full-text retrieval
 
@@ -110,3 +110,4 @@ Use `daily-review-packet --limit 12 --out <packet.json> --json` to collapse accu
 - Import only authorized/open/user-owned material; never bypass authentication, paywalls, robots controls, or access limits.
 - Store error reports in `errors/YYYY-MM/`, practice in `practice/`, PDFs in `output/pdf/`, and original structured imports in `data/raw/`.
 - Do not expose hidden answers before submission/request, and never call model-generated content verified.
+- `delete-error` refuses linked practice attempts by default; when the user explicitly removes that error, use `--detach-attempts` to preserve the attempts as standalone history rather than deleting them.

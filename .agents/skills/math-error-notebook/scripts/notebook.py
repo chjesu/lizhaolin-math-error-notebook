@@ -917,7 +917,12 @@ def fetch_error(conn: sqlite3.Connection, error_id: str) -> tuple[sqlite3.Row, l
     return row, codes
 
 
-def delete_error(conn: sqlite3.Connection, error_id: str, project_root: Path) -> dict[str, Any]:
+def delete_error(
+    conn: sqlite3.Connection,
+    error_id: str,
+    project_root: Path,
+    detach_attempts: bool = False,
+) -> dict[str, Any]:
     """Remove a mistakenly recorded error and its generated local artifacts."""
     row = conn.execute("SELECT image_path FROM errors WHERE id=?", (error_id,)).fetchone()
     if not row:
@@ -925,8 +930,18 @@ def delete_error(conn: sqlite3.Connection, error_id: str, project_root: Path) ->
     attempt_count = conn.execute(
         "SELECT COUNT(*) FROM attempts WHERE error_id=?", (error_id,)
     ).fetchone()[0]
-    if attempt_count:
+    if attempt_count and not detach_attempts:
         raise ValueError("cannot delete an error that has recorded practice attempts")
+
+    if attempt_count:
+        detach_note = f"Detached from deleted error {error_id} at {now_iso()}"
+        conn.execute(
+            """UPDATE attempts
+               SET error_id=NULL,
+                   note=CASE WHEN note IS NULL OR note='' THEN ? ELSE note || char(10) || ? END
+               WHERE error_id=?""",
+            (detach_note, detach_note, error_id),
+        )
 
     conn.execute("DELETE FROM errors WHERE id=?", (error_id,))
     conn.commit()
@@ -953,7 +968,12 @@ def delete_error(conn: sqlite3.Connection, error_id: str, project_root: Path) ->
             candidate.unlink()
             removed_files.append(str(candidate))
 
-    return {"error_id": error_id, "deleted": True, "removed_files": removed_files}
+    return {
+        "error_id": error_id,
+        "deleted": True,
+        "detached_attempts": attempt_count,
+        "removed_files": removed_files,
+    }
 
 
 def delete_rejected_questions(
@@ -1592,6 +1612,94 @@ def mark_review(conn: sqlite3.Connection, error_id: str, result: str, note: str 
         conn.execute("UPDATE errors SET status='mastered' WHERE id=?", (error_id,))
     conn.commit()
     return {"error_id": error_id, "result": result, "next_due": pending[0] if pending else None}
+
+
+def correct_review(
+    conn: sqlite3.Connection,
+    error_id: str,
+    result: str,
+    note: str | None,
+    on_date: date,
+) -> dict[str, Any]:
+    """Correct the latest review result without advancing the schedule twice."""
+    current = conn.execute(
+        """SELECT * FROM review_schedule
+           WHERE error_id=? AND completed_at IS NOT NULL
+           ORDER BY completed_at DESC, id DESC LIMIT 1""",
+        (error_id,),
+    ).fetchone()
+    if not current:
+        raise ValueError(f"completed review not found: {error_id}")
+
+    later_completed = conn.execute(
+        """SELECT COUNT(*) FROM review_schedule
+           WHERE error_id=? AND completed_at IS NOT NULL
+             AND (cycle>? OR (cycle=? AND stage>?))""",
+        (error_id, current["cycle"], current["cycle"], current["stage"]),
+    ).fetchone()[0]
+    if later_completed:
+        raise ValueError("cannot correct a review after a later stage was completed")
+
+    previous_result = current["result"]
+    correction_note = f"Correction {now_iso()}: {note or 'review result corrected'}"
+    merged_note = "\n".join(part for part in (current["note"], correction_note) if part)
+
+    if previous_result != result:
+        conn.execute(
+            "DELETE FROM review_schedule WHERE error_id=? AND completed_at IS NULL",
+            (error_id,),
+        )
+        if result == "correct":
+            stage = int(current["stage"])
+            if stage < 1 or stage > len(REVIEW_INTERVALS):
+                raise ValueError(f"unsupported review stage for correction: {stage}")
+            base_date = date.fromisoformat(current["due_date"]) - timedelta(
+                days=REVIEW_INTERVALS[stage - 1]
+            )
+            for next_stage, days in enumerate(REVIEW_INTERVALS, start=1):
+                if next_stage <= stage:
+                    continue
+                conn.execute(
+                    "INSERT INTO review_schedule(error_id,cycle,stage,due_date) VALUES(?,?,?,?)",
+                    (
+                        error_id,
+                        current["cycle"],
+                        next_stage,
+                        (base_date + timedelta(days=days)).isoformat(),
+                    ),
+                )
+        else:
+            cycle = int(current["cycle"]) + 1
+            intervals = REVIEW_INTERVALS if result == "wrong" else (1, 3, 7, 15, 30, 45)
+            for stage, days in enumerate(intervals, start=1):
+                conn.execute(
+                    "INSERT INTO review_schedule(error_id,cycle,stage,due_date) VALUES(?,?,?,?)",
+                    (error_id, cycle, stage, (on_date + timedelta(days=days)).isoformat()),
+                )
+
+    conn.execute(
+        "UPDATE review_schedule SET result=?, note=? WHERE id=?",
+        (result, merged_note, current["id"]),
+    )
+    pending = conn.execute(
+        """SELECT due_date FROM review_schedule
+           WHERE error_id=? AND completed_at IS NULL
+           ORDER BY cycle,stage LIMIT 1""",
+        (error_id,),
+    ).fetchone()
+    conn.execute(
+        "UPDATE errors SET status=? WHERE id=?",
+        ("active" if pending else "mastered", error_id),
+    )
+    conn.commit()
+    return {
+        "review_id": current["id"],
+        "error_id": error_id,
+        "previous_result": previous_result,
+        "result": result,
+        "next_due": pending[0] if pending else None,
+        "database_modified": True,
+    }
 
 
 def record_attempt(conn: sqlite3.Connection, args: argparse.Namespace) -> str:
@@ -3217,6 +3325,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("delete-error", help="remove a mistakenly recorded error")
     p.add_argument("error_id")
     p.add_argument("--project-root", type=Path, default=Path.cwd())
+    p.add_argument(
+        "--detach-attempts",
+        action="store_true",
+        help="preserve linked attempts but detach them before deleting the error",
+    )
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser(
@@ -3271,6 +3384,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("review", help="mark the next review stage")
+    p.add_argument("error_id")
+    p.add_argument("--result", choices=("correct", "partial", "wrong"), required=True)
+    p.add_argument("--note")
+    p.add_argument("--date")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("correct-review", help="correct the latest review result without duplication")
     p.add_argument("error_id")
     p.add_argument("--result", choices=("correct", "partial", "wrong"), required=True)
     p.add_argument("--note")
@@ -3548,7 +3668,9 @@ def main(argv: list[str] | None = None) -> int:
                     "database_modified": True,
                 }
             elif args.command == "delete-error":
-                payload = delete_error(conn, args.error_id, args.project_root)
+                payload = delete_error(
+                    conn, args.error_id, args.project_root, args.detach_attempts
+                )
             elif args.command == "delete-rejected-questions":
                 payload = delete_rejected_questions(
                     conn, args.question_ids, args.confirm
@@ -3577,6 +3699,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
             elif args.command == "review":
                 payload = mark_review(conn, args.error_id, args.result, args.note, parse_date(args.date))
+            elif args.command == "correct-review":
+                payload = correct_review(
+                    conn, args.error_id, args.result, args.note, parse_date(args.date)
+                )
             elif args.command == "attempt":
                 args.correct = not args.wrong
                 payload = {"attempt_id": record_attempt(conn, args)}

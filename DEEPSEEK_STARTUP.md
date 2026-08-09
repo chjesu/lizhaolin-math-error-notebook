@@ -61,6 +61,7 @@ python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py agent-c
 
 - RapidOCR：方向校正、印刷题目正文、题库编号、预览和疑难裁剪。
 - PaddleOCR FormulaNet：对疑难小裁剪生成数学公式 LaTeX 候选。
+- 三科错题本共用整机级 OCR 执行槽。Kimi、DeepSeek 或多个 Codex 会话同时调用时应等待 `photo-preflight` 自动排队，不得另起 OCR 脚本或并行加载模型；取得执行槽后脚本会再次检查缓存。可从 `doctor.ocr_runtime.concurrency` 查看实际共享锁。
 
 先运行：
 

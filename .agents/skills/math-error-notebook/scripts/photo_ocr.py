@@ -15,6 +15,9 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -27,6 +30,9 @@ OCR_RUNTIME = PROJECT_ROOT / ".runtime" / "ocr"
 OCR_REQUIREMENTS = PROJECT_ROOT / "requirements-ocr.txt"
 PADDLE_WORKER = SCRIPT_DIR / "paddle_formula_worker.py"
 PADDLE_FORMULA_MODEL = "PP-FormulaNet_plus-M"
+OCR_LOCK_TIMEOUT_SECONDS = 900.0
+OCR_ONNX_MAX_THREADS = 4
+OCR_SHARED_LOCK_ENV = "LIZHAOLIN_OCR_SHARED_LOCK"
 BUNDLED_PYTHON = (
     Path.home() / ".cache" / "codex-runtimes" / "codex-primary-runtime"
     / "dependencies" / "python" / "python.exe"
@@ -39,6 +45,119 @@ MATH_CUE = re.compile(
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _rapidocr_thread_count() -> int:
+    cpu_count = os.cpu_count() or 1
+    return max(1, min(OCR_ONNX_MAX_THREADS, cpu_count // 2 or 1))
+
+
+def ocr_lock_path(project_root: Path = PROJECT_ROOT) -> Path:
+    """Return the machine-wide OCR lock shared by all three notebooks."""
+    del project_root  # Kept for API compatibility with runtime-status callers.
+    override = os.environ.get(OCR_SHARED_LOCK_ENV, "").strip()
+    if override:
+        path = Path(override).expanduser()
+        if not path.is_absolute():
+            raise ValueError(f"{OCR_SHARED_LOCK_ENV} must be an absolute path")
+        return path
+    base = Path(tempfile.gettempdir())
+    return base / "LiZhaolinErrorNotebooks" / "locks" / "photo-ocr.lock"
+
+
+class OCRLockTimeout(RuntimeError):
+    pass
+
+
+class InterProcessFileLock:
+    """Cross-platform process lock released automatically on process exit."""
+
+    def __init__(
+        self,
+        path: Path,
+        timeout_seconds: float = OCR_LOCK_TIMEOUT_SECONDS,
+        poll_seconds: float = 0.2,
+    ) -> None:
+        self.path = path
+        self.timeout_seconds = max(0.0, float(timeout_seconds))
+        self.poll_seconds = max(0.02, float(poll_seconds))
+        self.wait_seconds = 0.0
+        self._stream: Any = None
+
+    @staticmethod
+    def _ensure_lock_byte(stream: Any) -> None:
+        stream.seek(0, os.SEEK_END)
+        if stream.tell() == 0:
+            stream.write(b"\0")
+            stream.flush()
+
+    @staticmethod
+    def _try_lock(stream: Any) -> None:
+        stream.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            return
+        import fcntl
+
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    @staticmethod
+    def _unlock(stream: Any) -> None:
+        stream.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            return
+        import fcntl
+
+        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+    def __enter__(self) -> "InterProcessFileLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._stream = self.path.open("a+b")
+        self._ensure_lock_byte(self._stream)
+        started = time.monotonic()
+        deadline = started + self.timeout_seconds
+        while True:
+            try:
+                self._try_lock(self._stream)
+                break
+            except OSError as exc:
+                if time.monotonic() >= deadline:
+                    self._stream.close()
+                    self._stream = None
+                    raise OCRLockTimeout(
+                        "OCR is busy in another notebook session; "
+                        f"waited {self.timeout_seconds:.1f}s for {self.path}"
+                    ) from exc
+                time.sleep(
+                    min(
+                        self.poll_seconds,
+                        max(0.0, deadline - time.monotonic()),
+                    )
+                )
+        self.wait_seconds = round(time.monotonic() - started, 3)
+        owner = json.dumps(
+            {"pid": os.getpid(), "acquired_at": now_iso()},
+            ensure_ascii=True,
+        ).encode("ascii")
+        self._stream.seek(1)
+        self._stream.truncate()
+        self._stream.write(owner)
+        self._stream.flush()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        if self._stream is None:
+            return
+        try:
+            self._unlock(self._stream)
+        finally:
+            self._stream.close()
+            self._stream = None
 
 
 def bundled_python() -> Path | None:
@@ -67,6 +186,14 @@ def ocr_runtime_status(project_root: Path = PROJECT_ROOT) -> dict[str, Any]:
         "rapidocr": rapidocr.is_dir(),
         "onnxruntime": onnxruntime.is_dir(),
         "models": len(model_files),
+        "concurrency": {
+            "strategy": "cross_process_file_lock",
+            "scope": "machine_wide_shared_across_subjects",
+            "lock_path": str(ocr_lock_path(project_root).resolve()),
+            "override_env": OCR_SHARED_LOCK_ENV,
+            "wait_timeout_seconds": OCR_LOCK_TIMEOUT_SECONDS,
+            "onnx_threads": _rapidocr_thread_count(),
+        },
     }
 
 
@@ -145,6 +272,9 @@ def _paddle_environment(project_root: Path) -> dict[str, str]:
             "PADDLE_PDX_CACHE_HOME": str(paddlex_cache),
             "PADDLE_PDX_MODEL_SOURCE": "BOS",
             "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True",
+            "FLAGS_allocator_strategy": "auto_growth",
+            "OMP_NUM_THREADS": str(_rapidocr_thread_count()),
+            "MKL_NUM_THREADS": str(_rapidocr_thread_count()),
             "PYTHONPATH": os.pathsep.join(
                 part
                 for part in (str(runtime), env.get("PYTHONPATH", ""))
@@ -254,6 +384,51 @@ def _batch_key(paths: Iterable[Path]) -> str:
         digest.update(str(path.resolve()).encode("utf-8"))
         digest.update(_sha256(path).encode("ascii"))
     return digest.hexdigest()[:16]
+
+
+def _ocr_profile(formula_ocr: str, project_root: Path) -> dict[str, Any]:
+    effective_formula_ocr = _formula_ocr_mode(formula_ocr, project_root)
+    return {
+        "rapidocr": "3.9.2 / PP-OCRv6",
+        "formula_ocr_requested": formula_ocr,
+        "formula_ocr_effective": effective_formula_ocr,
+        "formula_model": (
+            PADDLE_FORMULA_MODEL if effective_formula_ocr == "paddle" else None
+        ),
+    }
+
+
+def _cached_result(
+    packet_path: Path,
+    ocr_profile: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not packet_path.is_file():
+        return None
+    try:
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (
+        int(packet.get("schema_version", 0)) >= 2
+        and packet.get("ocr_profile") == ocr_profile
+    ):
+        return _compact_result(packet, packet_path, cache_hit=True)
+    return None
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def _resize_to_limit(image: Any, max_side: int) -> Any:
@@ -437,12 +612,19 @@ def _load_engine() -> Any:
     was_disabled = logger.disabled
     logger.disabled = True
     try:
-        return RapidOCR()
+        return RapidOCR(
+            params={
+                "EngineConfig.onnxruntime.intra_op_num_threads": (
+                    _rapidocr_thread_count()
+                ),
+                "EngineConfig.onnxruntime.inter_op_num_threads": 1,
+            }
+        )
     finally:
         logger.disabled = was_disabled
 
 
-def process_photos(
+def _process_photos_unlocked(
     image_paths: list[Path],
     project_root: Path,
     out_dir: Path | None = None,
@@ -462,26 +644,16 @@ def process_photos(
         raise ValueError("at least one photo is required")
 
     key = _batch_key(paths)
-    effective_formula_ocr = _formula_ocr_mode(formula_ocr, project_root)
-    ocr_profile = {
-        "rapidocr": "3.9.2 / PP-OCRv6",
-        "formula_ocr_requested": formula_ocr,
-        "formula_ocr_effective": effective_formula_ocr,
-        "formula_model": (
-            PADDLE_FORMULA_MODEL if effective_formula_ocr == "paddle" else None
-        ),
-    }
+    ocr_profile = _ocr_profile(formula_ocr, project_root)
+    effective_formula_ocr = str(ocr_profile["formula_ocr_effective"])
     if out_dir is None:
         out_dir = project_root / "data" / "grade-inputs" / f"photo-{key}"
     out_dir = out_dir.resolve()
     packet_path = out_dir / "ocr-packet.json"
-    if packet_path.is_file() and not force:
-        packet = json.loads(packet_path.read_text(encoding="utf-8"))
-        if (
-            int(packet.get("schema_version", 0)) >= 2
-            and packet.get("ocr_profile") == ocr_profile
-        ):
-            return _compact_result(packet, packet_path, cache_hit=True)
+    if not force:
+        cached = _cached_result(packet_path, ocr_profile)
+        if cached:
+            return cached
 
     out_dir.mkdir(parents=True, exist_ok=True)
     engine = (engine_factory or _load_engine)()
@@ -629,10 +801,66 @@ def process_photos(
         },
         "database_modified": False,
     }
-    packet_path.write_text(
-        json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    _write_json_atomic(packet_path, packet)
     return _compact_result(packet, packet_path, cache_hit=False)
+
+
+def process_photos(
+    image_paths: list[Path],
+    project_root: Path,
+    out_dir: Path | None = None,
+    max_side: int = 2400,
+    preview_side: int = 1100,
+    min_confidence: float = 0.86,
+    max_detail_crops: int = 6,
+    force: bool = False,
+    engine_factory: Callable[[], Any] | None = None,
+    formula_ocr: str = "auto",
+    lock_timeout_seconds: float = OCR_LOCK_TIMEOUT_SECONDS,
+    lock_factory: Callable[[Path, float], Any] | None = None,
+) -> dict[str, Any]:
+    """Run OCR through one machine-wide slot shared by all notebook sessions."""
+    paths = [path.resolve() for path in image_paths]
+    missing = [str(path) for path in paths if not path.is_file()]
+    if missing:
+        raise ValueError("photo not found: " + ", ".join(missing))
+    if not paths:
+        raise ValueError("at least one photo is required")
+    key = _batch_key(paths)
+    ocr_profile = _ocr_profile(formula_ocr, project_root)
+    effective_out_dir = (
+        out_dir.resolve()
+        if out_dir is not None
+        else (project_root / "data" / "grade-inputs" / f"photo-{key}").resolve()
+    )
+    packet_path = effective_out_dir / "ocr-packet.json"
+    if not force:
+        cached = _cached_result(packet_path, ocr_profile)
+        if cached:
+            cached["ocr_serialized"] = True
+            cached["ocr_lock_scope"] = "machine_wide_shared_across_subjects"
+            cached["ocr_lock_wait_seconds"] = 0.0
+            return cached
+
+    factory = lock_factory or InterProcessFileLock
+    lock = factory(ocr_lock_path(project_root), lock_timeout_seconds)
+    with lock:
+        result = _process_photos_unlocked(
+            paths,
+            project_root,
+            effective_out_dir,
+            max_side,
+            preview_side,
+            min_confidence,
+            max_detail_crops,
+            force,
+            engine_factory,
+            formula_ocr,
+        )
+    result["ocr_serialized"] = True
+    result["ocr_lock_scope"] = "machine_wide_shared_across_subjects"
+    result["ocr_lock_wait_seconds"] = float(getattr(lock, "wait_seconds", 0.0))
+    return result
 
 
 def _compact_result(

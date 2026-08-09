@@ -10,6 +10,7 @@ description: Manage a Chinese high-school math error notebook backed by one loca
 - On Windows PowerShell, always pass `-Encoding UTF8` to `Get-Content`, and run Python entry points with `-X utf8`; do not guess encodings after mojibake appears.
 - Start routine work with one compact, read-only call: `scripts/notebook.py agent-context --task grade|recommend|verify|import|review|pdf|maintenance --json`. Use `doctor --json` for environment health and `handoff --json` for a compact transfer snapshot.
 - Use image input directly for photos; never claim to switch models/providers.
+- Math, physics, and chemistry `photo-preflight` calls share one machine-wide OCR execution lock. Concurrent sessions queue through the authoritative entry point, then recheck the project-local content cache after acquiring the slot; never bypass the queue with a parallel OCR script. `LIZHAOLIN_OCR_SHARED_LOCK` may override the shared lock only with an absolute path.
 - Run deterministic work through `scripts/notebook.py`. Its project installation binds to the sole bank `data/math_notebook.db`; never discover, merge, copy over, or select another same-named DB.
 - Do not recursively enumerate `data/audits/`, `data/imports/`, or the question corpus. Use compact CLI queries.
 - For multi-step work, start a recoverable manifest with `workflow-start --kind grade|import|verify|recommend|pdf`; update each artifact with `workflow-update`, and resume from `workflow-status` instead of repeating completed stages.

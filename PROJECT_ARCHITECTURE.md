@@ -214,6 +214,7 @@ flowchart TD
 - `auto` 模式在 Paddle 不可用或运行失败时保留 RapidOCR 结果并写入警告；`paddle` 模式用于诊断，公式阶段失败即报错。
 - `ocr-packet.json` 缓存记录 OCR profile；运行时能力变化会自动重建旧缓存。缓存公式必须保留裁剪路径、坐标及 `requires_visual_confirmation=true`。
 - `doctor --json` 同时报告 `ocr_runtime` 与 `formula_ocr_runtime`，含模型是否已缓存。
+- 三科错题本共用一个整机级跨进程 OCR 执行锁，默认位于 `%TEMP%/LiZhaolinErrorNotebooks/locks/photo-ocr.lock`；系统临时目录是 Codex 沙箱允许三科共同写入的位置，也可用绝对路径环境变量 `LIZHAOLIN_OCR_SHARED_LOCK` 覆盖。锁覆盖 RapidOCR、裁剪生成和 Paddle 公式识别，避免不同项目或不同会话同时加载模型。等待前与取得锁后各检查一次本项目缓存，输出包使用原子替换写入；`doctor.ocr_runtime.concurrency` 报告实际锁路径、范围、超时和线程上限。
 - CLI：`print_output`、`build_parser`、`main`
 
 ## 6. `practice_sheet.py` 完整职责

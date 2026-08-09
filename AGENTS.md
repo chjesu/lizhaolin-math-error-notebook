@@ -12,5 +12,6 @@
 - 不满足上述条件的题，外部 `verified`、来源信誉、抽样或批量 SQL 均不能替代题干、答案、解析、标签、来源和重复项的逐题独立审核及 `verify-item`。
 - 仅导入开放授权或用户确认有权使用的材料；不得绕过登录、付费墙或访问限制。
 - 可机械化步骤必须优先调用现有脚本：照片错题先 `photo-preflight`，模型先读 RapidOCR 文本和可选 PaddleOCR 公式候选，只按需查看预览/疑难裁剪，再 `grade-preview → grade-commit`；候选推荐用 `recommend-packet`，审核准备用 `prepare-audit-batch`，模型精简决策用 `prepare-review-batch` 扩展，大量已完成的逐题审核用 `verify-review-batch` 提交，交接用 `handoff`；按日期导入 DOCX 用 `scripts/import_recent_docx_batch.py`，结构预检用 `scripts/audit_recent_docx_batch.py`。OCR 只作辅助，公式候选也不可信任；公式、图形和手写步骤必须视觉复核。不得让模型重复拼装这些固定结构，也不得用批处理放宽逐题验证质量门。
+- 数学、物理、化学三个项目的 `photo-preflight` 共用整机级 OCR 执行锁。多会话必须等待权威入口排队，禁止另建 OCR 脚本、改用项目私有锁或通过并行进程绕过；取得执行槽后会再次检查本项目内容哈希缓存。共享锁可用绝对路径环境变量 `LIZHAOLIN_OCR_SHARED_LOCK` 覆盖。
 - 为减少 token 消耗，已由模型形式化为 SymPy 表达式的代数、方程、恒等式和代入检查，优先批量调用 `python -B scripts/symbolic_precheck.py <checks.json>`；默认只把 `fail`/`unknown` 项交回模型扩展推理。`pass` 只证明提交的形式化表达式成立，不替代题意、图形、定义域、分类、标签、来源、重复项及 `audit-item → verify-item` 复核。
 - 跨学科下载监听统一使用 `services/exam_ingest_watcher.py` 和 `config/exam-ingest-watcher.json`。该服务只能编排数学、物理、化学项目已有的转换器和权威 `notebook.py`，不得直接写任一数据库；仅在质量门、导入结果和 `bank-info` 完整性均通过，或权威入口确认重复时，才可把源试卷移至 E 盘归档目录。

@@ -64,6 +64,7 @@ python -B <skill-dir>\scripts\notebook.py grade-commit <analysis.json> --copy-im
 - When two or more genuinely different applicable methods exist, list them separately; do not present cosmetic algebra rearrangements as different methods.
 - If the original stem, symbol, condition, or diagram is unclear, do not reconstruct it silently. State what is unreadable and request a clearer crop.
 - For a fully correct answer, a concise verdict plus the key verification is sufficient.
+- End every grading response with a short **下一步** block addressed to the child. State an immediate action, a concrete quantity or completion condition, and what to submit afterward. For wrong/partial work, normally require: cover the solution, redo the original from the first wrong step, complete the assigned verified recommendations, then send clear photos. For correct work, state whether to continue to the next assigned item or stop until the recorded review date. For unclear work, request only the exact missing crop or condition. Never end with generic advice such as “多练习” or “认真检查”.
 
 ## Recommend and print
 

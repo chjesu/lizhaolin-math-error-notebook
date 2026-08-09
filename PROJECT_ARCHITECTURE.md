@@ -436,7 +436,10 @@ original question, the student's submitted work, the first substantive error,
 a complete corrected solution, and the final answer. Distinct applicable
 methods are listed separately. Unreadable stems, symbols, conditions, or
 diagrams are reported as unclear rather than reconstructed. Fully correct work
-needs only a concise verdict and key verification.
+needs only a concise verdict and key verification. Every grading response ends
+with an actionable `下一步`: what the child does now, the exact quantity or
+completion condition, and what to submit afterward. Generic advice is not a
+valid handoff.
 
 题库写入后必须报告具体 ID、数量变化、完整性和外键结果。不得只凭对话声明完成。
 

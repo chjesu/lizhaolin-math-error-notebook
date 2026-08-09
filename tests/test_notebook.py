@@ -808,6 +808,15 @@ class NotebookTests(unittest.TestCase):
             health["text_encoding"]["powershell_read_command"],
             "Get-Content -Raw -Encoding UTF8 <path>",
         )
+        grade_context = notebook.agent_context(
+            self.conn, self.db, ROOT, "grade"
+        )
+        self.assertTrue(
+            any("下一步" in rule for rule in grade_context["critical_rules"])
+        )
+        self.assertTrue(
+            any("UTF-8" in rule for rule in grade_context["critical_rules"])
+        )
 
     def test_verification_requires_all_review_checks(self):
         notebook.import_records(

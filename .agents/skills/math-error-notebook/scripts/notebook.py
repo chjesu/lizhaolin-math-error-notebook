@@ -3036,6 +3036,9 @@ def handoff_snapshot(
 
 AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
     "grade": {
+        "critical_rules": [
+            "end every grading response with an actionable 下一步: what to do now, how much, and what to submit next",
+        ],
         "commands": [
             "behavior-cases --category grade --json",
             "photo-preflight <image...> --json",
@@ -3128,7 +3131,7 @@ def agent_context(
             "recommend only verified questions and review relevance before save",
             "PDF defaults to no answers and no print",
             "mathematical judgment remains model-reviewed; deterministic scripts do not replace it",
-        ],
+        ] + list(task_context.get("critical_rules", [])),
         "simplified_verification_policy": (
             {
                 "legacy_batch": RELIABLE_BATCH,
@@ -3138,7 +3141,11 @@ def agent_context(
             }
             if task == "verify" else None
         ),
-        **task_context,
+        **{
+            key: value
+            for key, value in task_context.items()
+            if key != "critical_rules"
+        },
     }
 
 

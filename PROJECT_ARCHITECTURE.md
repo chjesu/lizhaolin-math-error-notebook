@@ -69,7 +69,7 @@ flowchart TD
     PDF --> AT["学生作答"]
     AT --> ATT["attempt"]
     ATT --> DUE["due / review：自适应复习周期"]
-    DUE --> DP["daily-review-packet：每个错题仅保留一个当日任务"]
+    DUE --> DP["daily-review-packet：每个错题仅保留一个分阶段当日任务"]
     DP --> PS
 ```
 
@@ -169,7 +169,7 @@ flowchart TD
 | 推荐审核包 | `recommend-packet` | 本地完成关键词拆分、占位题过滤和排序，默认写入不含答案/长解析的精简审核包；同一审核包复核后可直接交给 `assign-recommendations` |
 | 人工推荐 | `assign-recommendations` | 用模型逐题复核后的已验证题替换自动候选 |
 | 复习到期 | `due` | 查询到期或逾期复习任务 |
-| 每日复习包 | `daily-review-packet` | 每个活动错题合并为一个任务，只带已复核且已验证的推荐题 |
+| 每日复习包 | `daily-review-packet` | 每个活动错题合并为一个任务；阶段1–2带2道同难度推荐，阶段3–4带1道变式，阶段5–6带1道优先略难迁移题；只使用已复核且已验证题 |
 | 复习反馈 | `review` | 记录 correct/partial/wrong，并在失败时启动新周期 |
 | 复习更正 | `correct-review` | 原位更正最近一次误判，并恢复或重建对应复习周期；不重复推进阶段 |
 | 作答记录 | `attempt` | 保存推荐题对错、答案和新的错因 |

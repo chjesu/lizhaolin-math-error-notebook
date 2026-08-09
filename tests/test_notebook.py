@@ -1419,14 +1419,44 @@ class NotebookTests(unittest.TestCase):
             self.conn, date.today() + timedelta(days=31), 12, out
         )
         self.assertEqual(result["selected_errors"], 1)
-        self.assertEqual(result["printable_questions"], 1)
+        self.assertEqual(result["printable_questions"], 2)
         error, items, knowledge, packet_date = practice_sheet.load_daily_packet(
             self.db, out
         )
-        self.assertEqual(len(items), 1)
+        self.assertEqual(len(items), 2)
         self.assertIn("今日到期复习", error["problem_text"])
         self.assertTrue(knowledge)
         self.assertEqual(packet_date, (date.today() + timedelta(days=31)).isoformat())
+
+    def test_daily_review_packet_uses_two_recommendations_for_early_stage(self):
+        error_id = self.create_error()
+        notebook.recommend(self.conn, error_id, 3, True, self.root)
+        out = self.root / "daily-early.json"
+        result = notebook.daily_review_packet(
+            self.conn, date.today() + timedelta(days=1), 12, out
+        )
+        packet = json.loads(out.read_text(encoding="utf-8"))
+        self.assertEqual(packet["items"][0]["stage"], 1)
+        self.assertEqual(packet["items"][0]["required_recommendations"], 2)
+        self.assertEqual(result["printable_questions"], 2)
+        error, items, _, _ = practice_sheet.load_daily_packet(self.db, out)
+        self.assertEqual(len(items), 2)
+        self.assertIn("错题回顾", items[0]["stem"])
+        self.assertNotIn("错题回顾", items[1]["stem"])
+        self.assertIn("今日到期复习", error["problem_text"])
+
+    def test_daily_review_packet_keeps_original_when_recommendations_are_missing(self):
+        error_id = self.create_error()
+        out = self.root / "daily-original-only.json"
+        result = notebook.daily_review_packet(
+            self.conn, date.today() + timedelta(days=1), 12, out
+        )
+        self.assertEqual(result["printable_questions"], 0)
+        self.assertEqual(result["missing_reviewed_recommendations"], [error_id])
+        _, items, _, _ = practice_sheet.load_daily_packet(self.db, out)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["question_id"], error_id)
+        self.assertIn("错题回顾", items[0]["stem"])
 
     def test_recoverable_workflow_enforces_order_and_is_idempotent(self):
         started = notebook.workflow_start(self.root, "grade", "photo batch")

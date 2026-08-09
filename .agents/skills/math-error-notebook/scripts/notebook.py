@@ -1382,11 +1382,16 @@ def daily_review_packet(
     limit: int,
     out_path: Path,
 ) -> dict[str, Any]:
-    """Build one compact, deduplicated review task per active error.
+    """Build one compact, stage-aware review task per active error.
 
     Only already saved, verified recommendations are placed into the printable
     part of the packet. Missing recommendations are reported for model review
     instead of silently accepting unreviewed automatic candidates.
+
+    Stages 1-2 use two same-level recommendations, stages 3-4 use one saved
+    variation, and stages 5-6 use one recommendation with a preference for a
+    slightly higher difficulty.  This keeps the daily automation deterministic
+    while preserving the model-reviewed recommendation boundary.
     """
     rows = conn.execute(
         """SELECT e.id AS error_id, e.problem_text, e.cause_code, e.difficulty,
@@ -1394,29 +1399,74 @@ def daily_review_packet(
                   (SELECT rs2.id FROM review_schedule rs2
                    WHERE rs2.error_id=e.id AND rs2.completed_at IS NULL
                      AND rs2.due_date<=?
-                   ORDER BY rs2.due_date,rs2.cycle,rs2.stage LIMIT 1) AS review_id
+                   ORDER BY rs2.due_date,rs2.cycle,rs2.stage LIMIT 1) AS review_id,
+                  (SELECT rs2.cycle FROM review_schedule rs2
+                   WHERE rs2.error_id=e.id AND rs2.completed_at IS NULL
+                     AND rs2.due_date<=?
+                   ORDER BY rs2.due_date,rs2.cycle,rs2.stage LIMIT 1) AS cycle,
+                  (SELECT rs2.stage FROM review_schedule rs2
+                   WHERE rs2.error_id=e.id AND rs2.completed_at IS NULL
+                     AND rs2.due_date<=?
+                   ORDER BY rs2.due_date,rs2.cycle,rs2.stage LIMIT 1) AS stage
            FROM review_schedule rs
            JOIN errors e ON e.id=rs.error_id
            WHERE rs.completed_at IS NULL AND rs.due_date<=? AND e.status='active'
            GROUP BY e.id
            ORDER BY earliest_due, e.difficulty DESC, e.id""",
-        (target.isoformat(), target.isoformat()),
+        (
+            target.isoformat(),
+            target.isoformat(),
+            target.isoformat(),
+            target.isoformat(),
+        ),
     ).fetchall()
     items: list[dict[str, Any]] = []
     missing_recommendations: list[str] = []
+    recommendation_shortfalls: list[dict[str, Any]] = []
     for row in rows:
         overdue_days = max(0, (target - date.fromisoformat(row["earliest_due"])).days)
-        recommendation = conn.execute(
-            """SELECT r.rank,r.reason,q.id AS question_id,q.stem,q.options_json,
-                      q.difficulty,q.source_name
+        stage = int(row["stage"])
+        required_recommendations = 2 if stage <= 2 else 1
+        recommendation_rows = conn.execute(
+            """SELECT r.rank,r.reason,r.status,q.id AS question_id,q.stem,
+                      q.options_json,q.difficulty,q.source_name
                FROM recommendations r
                JOIN questions q ON q.id=r.question_id
                WHERE r.error_id=? AND q.verified=1
                  AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.question_id=q.id)
-               ORDER BY CASE WHEN r.status='assigned' THEN 0 ELSE 1 END,r.rank,q.id
-               LIMIT 1""",
+               ORDER BY CASE WHEN r.status='assigned' THEN 0 ELSE 1 END,
+                        r.rank,q.id""",
             (row["error_id"],),
-        ).fetchone()
+        ).fetchall()
+        base_difficulty = float(row["difficulty"])
+        if stage <= 2:
+            recommendation_rows = sorted(
+                recommendation_rows,
+                key=lambda item: (
+                    abs(float(item["difficulty"]) - base_difficulty),
+                    0 if item["status"] == "assigned" else 1,
+                    int(item["rank"]),
+                    item["question_id"],
+                ),
+            )
+        elif stage >= 5:
+            recommendation_rows = sorted(
+                recommendation_rows,
+                key=lambda item: (
+                    0 if float(item["difficulty"]) > base_difficulty else 1,
+                    abs(float(item["difficulty"]) - (base_difficulty + 0.5)),
+                    0 if item["status"] == "assigned" else 1,
+                    int(item["rank"]),
+                    item["question_id"],
+                ),
+            )
+        recommendations: list[dict[str, Any]] = []
+        for recommendation in recommendation_rows[:required_recommendations]:
+            question = dict(recommendation)
+            question.pop("status", None)
+            raw_options = question.pop("options_json", None)
+            question["options"] = json.loads(raw_options) if raw_options else None
+            recommendations.append(question)
         knowledge = [
             item[0] for item in conn.execute(
                 """SELECT kp.name FROM error_knowledge ek
@@ -1425,16 +1475,18 @@ def daily_review_packet(
                 (row["error_id"],),
             )
         ]
-        question = None
-        if recommendation:
-            question = dict(recommendation)
-            raw_options = question.pop("options_json", None)
-            question["options"] = json.loads(raw_options) if raw_options else None
-        else:
+        if len(recommendations) < required_recommendations:
             missing_recommendations.append(row["error_id"])
+            recommendation_shortfalls.append({
+                "error_id": row["error_id"],
+                "required": required_recommendations,
+                "available": len(recommendations),
+            })
         items.append({
             "error_id": row["error_id"],
             "review_id": row["review_id"],
+            "cycle": row["cycle"],
+            "stage": stage,
             "earliest_due": row["earliest_due"],
             "overdue_days": overdue_days,
             "due_stages": row["due_stages"],
@@ -1443,21 +1495,30 @@ def daily_review_packet(
             "cause_code": row["cause_code"],
             "difficulty": row["difficulty"],
             "knowledge": knowledge,
-            "question": question,
+            "required_recommendations": required_recommendations,
+            "questions": recommendations,
+            "question": recommendations[0] if recommendations else None,
         })
     items.sort(key=lambda item: (-item["priority"], item["earliest_due"], item["error_id"]))
     total_due_stages = sum(int(item["due_stages"]) for item in items)
     items = items[:max(1, limit)]
     selected_ids = {item["error_id"] for item in items}
     missing_recommendations = [item for item in missing_recommendations if item in selected_ids]
+    recommendation_shortfalls = [
+        item for item in recommendation_shortfalls if item["error_id"] in selected_ids
+    ]
     packet = {
         "schema": "math-daily-review-packet/v1",
         "date": target.isoformat(),
         "generated_at": now_iso(),
         "defaults": {"answers": False, "print": False},
-        "selection_rule": "one task per active error; overdue, accumulated stages, then difficulty",
+        "selection_rule": (
+            "one task per active error; stages 1-2 use two same-level recommendations; "
+            "stages 3-4 use one variation; stages 5-6 use one slightly harder recommendation"
+        ),
         "items": items,
         "missing_reviewed_recommendations": missing_recommendations,
+        "recommendation_shortfalls": recommendation_shortfalls,
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1466,8 +1527,9 @@ def daily_review_packet(
         "due_stages": total_due_stages,
         "due_errors": len(rows),
         "selected_errors": len(items),
-        "printable_questions": sum(item["question"] is not None for item in items),
+        "printable_questions": sum(len(item["questions"]) for item in items),
         "missing_reviewed_recommendations": missing_recommendations,
+        "recommendation_shortfalls": recommendation_shortfalls,
         "packet": str(out_path.resolve()),
         "database_modified": False,
     }

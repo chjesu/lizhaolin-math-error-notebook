@@ -143,33 +143,61 @@ def load_daily_packet(
     knowledge: list[str] = []
     error_summaries: list[str] = []
     for item in packet.get("items") or []:
-        question = item.get("question") or {}
-        question_id = question.get("question_id")
-        if not question_id:
-            continue
-        row = conn.execute(
-            """SELECT id AS question_id,stem,options_json,answer,solution,
-                      difficulty,source_name,verified
-               FROM questions WHERE id=?""",
-            (question_id,),
-        ).fetchone()
-        if not row or not row["verified"]:
-            continue
-        rank = len(rows) + 1
-        error_summaries.append(f"{rank}. {item['problem_text']}")
-        for name in item.get("knowledge") or []:
-            if name not in knowledge:
-                knowledge.append(name)
-        record = dict(row)
-        record.update({
-            "rank": rank,
-            "reason": question.get("reason") or f"到期复习：{item['error_id']}",
-            "stem": f"错题回顾：{item['problem_text']}\n\n同类练习：{row['stem']}",
-        })
-        rows.append(record)
+        questions = item.get("questions")
+        if questions is None:
+            questions = [item.get("question") or {}]
+        included_for_error = 0
+        for question in questions:
+            question_id = question.get("question_id")
+            if not question_id:
+                continue
+            row = conn.execute(
+                """SELECT id AS question_id,stem,options_json,answer,solution,
+                          difficulty,source_name,verified
+                   FROM questions WHERE id=?""",
+                (question_id,),
+            ).fetchone()
+            if not row or not row["verified"]:
+                continue
+            rank = len(rows) + 1
+            included_for_error += 1
+            if included_for_error == 1:
+                error_summaries.append(f"{rank}. {item['problem_text']}")
+            for name in item.get("knowledge") or []:
+                if name not in knowledge:
+                    knowledge.append(name)
+            prefix = (
+                f"错题回顾：{item['problem_text']}\n\n"
+                if included_for_error == 1
+                else ""
+            )
+            record = dict(row)
+            record.update({
+                "rank": rank,
+                "reason": question.get("reason") or f"到期复习：{item['error_id']}",
+                "stem": f"{prefix}同类练习 {included_for_error}：{row['stem']}",
+            })
+            rows.append(record)
+        if included_for_error == 0:
+            rank = len(rows) + 1
+            error_summaries.append(f"{rank}. {item['problem_text']}")
+            for name in item.get("knowledge") or []:
+                if name not in knowledge:
+                    knowledge.append(name)
+            rows.append({
+                "question_id": item["error_id"],
+                "stem": f"错题回顾：{item['problem_text']}",
+                "options_json": None,
+                "answer": "",
+                "solution": "",
+                "difficulty": item.get("difficulty") or 0,
+                "source_name": "李兆霖数学错题本",
+                "rank": rank,
+                "reason": "本阶段暂无已复核推荐题，仅复习错题原题。",
+            })
     conn.close()
     if not rows:
-        raise ValueError("daily packet contains no reviewed verified recommendations")
+        raise ValueError("daily packet contains no review items")
     synthetic_error = {
         "problem_text": "今日到期复习共 " + str(len(rows)) + " 项。每项先回忆原错因，再独立完成同类题。",
         "cause_code": None,

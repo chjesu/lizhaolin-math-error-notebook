@@ -323,6 +323,10 @@ def _extract_math(text: str) -> str:
 _FRAC_STYLE_COMMANDS = ("\\dfrac", "\\tfrac", "\\frac", "\\binom")
 _ONE_ARG_MATH_COMMANDS = ("\\sqrt", "\\vec")
 _CJK_MATH_PUNCT = str.maketrans("，；：（）．", ",;:().")
+_STANDALONE_LINE_L = re.compile(r"(?<![A-Za-z\\])l(?![A-Za-z])")
+_PROTECTED_TEXT_COMMAND = re.compile(
+    r"\\(?:text|mathrm|operatorname)\{[^{}]*\}"
+)
 
 
 def _read_math_token(latex: str, index: int) -> tuple[str, int] | None:
@@ -411,10 +415,36 @@ def _normalize_math_args(latex: str) -> str:
     return "".join(out)
 
 
+def _normalize_line_symbol(latex: str) -> str:
+    r"""Render a standalone line variable ``l`` as the unambiguous ``\ell``.
+
+    The default math italic lowercase ``l`` resembles a slash in the PDF font.
+    Only independent math identifiers are replaced; command names and explicit
+    text/roman groups such as ``\lim`` and ``\mathrm{l}`` remain untouched.
+    """
+    protected: list[str] = []
+
+    def _protect(match: "re.Match[str]") -> str:
+        token = f"ZZPROTECTED{len(protected):04d}ZZ"
+        protected.append(match.group(0))
+        return token
+
+    value = _PROTECTED_TEXT_COMMAND.sub(_protect, latex)
+    value = _STANDALONE_LINE_L.sub(r"\\ell", value)
+    for index, original in enumerate(protected):
+        value = value.replace(f"ZZPROTECTED{index:04d}ZZ", original)
+    return value
+
+
+def _normalize_render_latex(latex: str) -> str:
+    """Return the canonical LaTeX string consumed by the PDF renderer."""
+    return _normalize_line_symbol(_normalize_math_args(latex))
+
+
 def _render_math_image(latex: str, font_size: float) -> tuple[str, float, float]:
     """Render one math segment with matplotlib mathtext; return (url, w_pt, h_pt)."""
     import matplotlib
-    latex = _normalize_math_args(latex)
+    latex = _normalize_render_latex(latex)
     key = hashlib.sha256(
         f"{MATH_CACHE_VERSION}|{matplotlib.__version__}|{latex}|{font_size:.2f}".encode("utf-8")
     ).hexdigest()[:16]
@@ -495,6 +525,7 @@ def _latex_to_text(value: str) -> str:
             break
     replacements = {
         "\\le": "≤", "\\ge": "≥", "\\ne": "≠", "\\perp": "⊥",
+        "\\ell": "ℓ",
         "\\parallel": "∥", "\\pi": "π", "\\infty": "∞",
         "\\cdot": "·", "\\times": "×", "\\pm": "±",
         "\\angle": "∠", "\\triangle": "△", "\\therefore": "∴",

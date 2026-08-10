@@ -1086,6 +1086,27 @@ class NotebookTests(unittest.TestCase):
         for source, expected in cases.items():
             self.assertEqual(practice_sheet._normalize_math_args(source), expected)
 
+    def test_practice_sheet_normalizes_line_symbol_to_ell(self):
+        cases = {
+            "l": r"\ell",
+            r"l_1\perp l_2": r"\ell_1\perp \ell_2",
+            r"y=k l+b": r"y=k \ell+b",
+            r"\lim_{x\to0}x": r"\lim_{x\to0}x",
+            r"\left(l+1\right)": r"\left(\ell+1\right)",
+            r"\mathrm{l}": r"\mathrm{l}",
+            r"\ell": r"\ell",
+        }
+        for source, expected in cases.items():
+            self.assertEqual(practice_sheet._normalize_line_symbol(source), expected)
+
+        # Both spellings must reach the PDF renderer as the same canonical
+        # LaTeX, without requiring the native PDF runtime in this unit test.
+        self.assertEqual(
+            practice_sheet._normalize_render_latex("l"),
+            practice_sheet._normalize_render_latex(r"\ell"),
+        )
+        self.assertEqual(practice_sheet._latex_to_text(r"\ell"), "ℓ")
+
     def test_practice_sheet_renders_tex_shorthand_as_images(self):
         # 题库中存在 TeX 简写（单 token 参数不带花括号），mathtext 原生拒绝，
         # 规范化后必须走图片渲染而不是退回 "frac√105" 式文本。

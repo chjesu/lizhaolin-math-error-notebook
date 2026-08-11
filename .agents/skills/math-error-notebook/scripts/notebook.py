@@ -2966,9 +2966,15 @@ def doctor(
         ocr_runtime = {"available": False}
         formula_ocr_runtime = {"available": False}
         local_vlm_runtime = {"enabled": False, "service_available": False}
-    if not ocr_runtime.get("available"):
+    photo_preflight_config = config.get("photo_preflight", {})
+    default_preflight_mode = (
+        str(photo_preflight_config.get("default_mode") or "remote")
+        if isinstance(photo_preflight_config, dict)
+        else "remote"
+    )
+    if default_preflight_mode == "ocr" and not ocr_runtime.get("available"):
         warnings.append("ocr_runtime_not_installed")
-    if not formula_ocr_runtime.get("available"):
+    if default_preflight_mode == "ocr" and not formula_ocr_runtime.get("available"):
         warnings.append("paddle_formula_ocr_runtime_not_installed")
     if (
         local_vlm_runtime.get("enabled")
@@ -2994,6 +3000,11 @@ def doctor(
         "ocr_runtime": ocr_runtime,
         "formula_ocr_runtime": formula_ocr_runtime,
         "local_visual_model": local_vlm_runtime,
+        "photo_preflight": {
+            "default_mode": default_preflight_mode,
+            "local_processing": "exif_transpose_white_background_resize_only",
+            "remote_visual_review_required": default_preflight_mode == "remote",
+        },
         "search_index": search_index_status(conn),
         "text_encoding": encoding_status,
         "printer": config.get("printer_name"),
@@ -3048,13 +3059,14 @@ AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
     "grade": {
         "critical_rules": [
             "end every grading response with an actionable 下一步: what to do now, how much, and what to submit next",
-            "a local visual model may only return validated transcription evidence; it must never grade or solve",
+            "photo-preflight defaults to local size control only; a remote vision-capable model must inspect every preview_path directly",
+            "text-only models such as DeepSeek must hand photo grading to a vision-capable model and must never claim to have seen the image",
+            "local OCR/Qwen is diagnostic-only through --preflight-mode ocr and must never grade or solve",
         ],
         "commands": [
             "behavior-cases --category grade --json",
             "photo-preflight <image...> --json",
-            "photo-vlm-contract --json when a local visual model is used",
-            "photo-vlm-validate <response.json> --packet <ocr-packet.json> --page <n> --json",
+            "photo-preflight <image...> --preflight-mode ocr --json only for an explicit OCR diagnostic",
             "question <id> --compact --json when the sheet exposes a question ID",
             "causes --text <topic> --json",
             "knowledge --text <topic> --json",
@@ -3202,9 +3214,13 @@ def prepare_audit_batch(
         ]
         packet["visual_evidence"] = None
         if review_paths and visual_evidence != "off":
-            from photo_ocr import ensure_ocr_runtime, process_photos
+            from photo_ocr import process_photos
 
-            ensure_ocr_runtime()
+            preflight_mode = "ocr" if visual_evidence == "required" else "remote"
+            if preflight_mode == "ocr":
+                from photo_ocr import ensure_ocr_runtime
+
+                ensure_ocr_runtime()
             packet["visual_evidence"] = process_photos(
                 review_paths,
                 DEFAULT_PROJECT_ROOT,
@@ -3212,6 +3228,7 @@ def prepare_audit_batch(
                 formula_ocr="auto",
                 vision_mode=visual_evidence,
                 task="verify",
+                preflight_mode=preflight_mode,
                 force=force,
             )
         unsigned_packet = dict(packet)
@@ -3403,15 +3420,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "photo-preflight",
-        help="create a cached offline OCR packet before photo grading",
+        help="create cached size-controlled previews for remote visual grading",
     )
     p.add_argument("images", type=Path, nargs="+")
     p.add_argument("--project-root", type=Path, default=DEFAULT_PROJECT_ROOT)
     p.add_argument("--out-dir", type=Path)
     p.add_argument("--max-side", type=int, default=2400)
-    p.add_argument("--preview-side", type=int, default=1100)
+    p.add_argument("--preview-side", type=int, default=2000)
     p.add_argument("--min-confidence", type=float, default=0.86)
     p.add_argument("--max-detail-crops", type=int, default=6)
+    p.add_argument(
+        "--preflight-mode",
+        choices=("remote", "ocr"),
+        default="remote",
+        help="remote only resizes images for direct model vision; ocr enables the slower legacy OCR pipeline",
+    )
     p.add_argument(
         "--formula-ocr",
         choices=("auto", "off", "paddle"),
@@ -3637,7 +3660,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--visual-evidence",
         choices=("auto", "off", "required"),
         default="auto",
-        help="preflight image-backed questions; auto falls back safely when local Qwen is unavailable",
+        help="preflight image-backed questions; auto creates remote-vision previews, required runs legacy OCR/local-Qwen diagnostics",
     )
     p.add_argument("--json", action="store_true")
 
@@ -3736,21 +3759,25 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("prepare-audit-batch requires Pillow for visual audit previews")
     try:
         if args.command == "photo-preflight":
-            from photo_ocr import ensure_ocr_runtime, process_photos
+            from photo_ocr import process_photos
 
-            ensure_ocr_runtime()
+            if args.preflight_mode == "ocr":
+                from photo_ocr import ensure_ocr_runtime
+
+                ensure_ocr_runtime()
             payload = process_photos(
                 args.images,
                 args.project_root,
                 args.out_dir,
                 max(800, min(args.max_side, 5000)),
-                max(600, min(args.preview_side, 1800)),
+                max(600, min(args.preview_side, 3200)),
                 max(0.0, min(args.min_confidence, 1.0)),
                 max(0, min(args.max_detail_crops, 20)),
                 force=args.force,
                 formula_ocr=args.formula_ocr,
                 vision_mode=args.vision_mode,
                 task=args.task,
+                preflight_mode=args.preflight_mode,
             )
             print_output(payload, args.json, args.pretty_json)
             return 0

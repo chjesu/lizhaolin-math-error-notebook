@@ -88,20 +88,20 @@ flowchart LR
 
 ## 核心能力
 
-- **照片批改**：RapidOCR 先做低成本预检并只输出必要小图；本地 Qwen 有严格转录合同和回退机制，但当前实测未达到速度/结构门槛，默认自动推理关闭；可选 PaddleOCR 只提供公式候选。
+- **照片批改**：本地只做 EXIF 方向、透明底白底化与尺寸压缩，远端视觉模型直接查看标准化预览并判题；RapidOCR、PaddleOCR 和本地 Qwen 仅保留为显式诊断工具。
 - **步骤级诊断**：定位第一处实质错误，区分知识点未掌握、方法选择错误、计算错误等原因。
 - **可信题库**：记录年级、难度、知识点、来源、许可、结构特征、去重指纹和验证状态。
 - **针对性推荐**：只从已验证题中按知识点、错因、难度和历史表现推荐同类型练习。
 - **练习 PDF**：生成适合 A4 打印的无答案练习卷；仅在明确要求时附答案或调用打印机。
 - **复习闭环**：记录作答结果、复习日期、薄弱知识点和重复错因，生成每日复习任务。
 - **试卷入库**：导入用户授权的 DOCX、PDF 及结构化题目，经过质量门和逐题审核后进入主库。
-- **低 Token 工作流**：OCR 预处理、批量审核包、结构化决策扩展和 SymPy 预检均由本地脚本完成。
+- **低 Token 工作流**：图片尺寸控制、批量审核包、结构化决策扩展和 SymPy 预检均由本地脚本完成；远端只接收适合判读的标准化预览。
 
 ## 工作流程
 
 ```mermaid
 flowchart LR
-    A[错题照片] --> B[OCR 与视觉复核]
+    A[错题照片] --> B[本地尺寸控制与远端视觉复核]
     B --> C[逐题判定与错因诊断]
     C --> D[结构化错题记录]
     D --> E[已验证题检索]
@@ -119,7 +119,7 @@ flowchart LR
 
 1. 唯一主库固定为 `data/math_notebook.db`，不得搜索、合并或改用其他同名数据库。
 2. 推荐题必须已经验证，并显示来源和推荐理由。
-3. OCR 只作辅助；数学公式、图形和手写步骤必须视觉复核。
+3. 默认判题不运行 OCR；数学公式、图形和手写步骤由远端视觉模型直接复核。显式诊断所得 OCR 也只能作辅助。
 4. 透明 PNG 只在审核看图阶段生成白底预览，原始入库图片保持不变。
 5. 未验证题不得作为推荐题；来源信誉不能替代逐题审核。
 6. 只导入开放授权、官方公开或用户确认有权使用的材料。
@@ -169,8 +169,11 @@ python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py seed
 ### 照片错题
 
 ```powershell
-# OCR、本地视觉条件分流与图片预检
-python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-preflight <照片路径> --vision-mode auto --task grade --json
+# 本地仅控制尺寸；随后由当前远端视觉模型打开全部 preview_paths
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-preflight <照片路径> --task grade --json
+
+# 仅在明确诊断 OCR 时使用较慢的旧链路
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-preflight <照片路径> --preflight-mode ocr --formula-ocr off --vision-mode off --json
 
 # 生成判题预览；确认后再提交正式记录
 python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py grade-preview <判题输入JSON> --json

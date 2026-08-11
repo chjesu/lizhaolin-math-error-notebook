@@ -57,20 +57,21 @@ python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py agent-c
 
 ## 5. DeepSeek 无视觉能力时的照片判题流程
 
-项目已提供条件分流的本地视觉预检，DeepSeek 只读取精简 JSON：
-
-- RapidOCR：方向校正、印刷题目正文、题库编号、预览和疑难裁剪。
-- PaddleOCR FormulaNet：对疑难小裁剪生成数学公式 LaTeX 候选。
-- 本地 Qwen：只对低置信度、文字过少或疑难页面转录手写与图形；严格禁止判题、求解和给标准答案。
-- 三科错题本共用整机级 OCR 执行槽。Kimi、DeepSeek 或多个 Codex 会话同时调用时应等待 `photo-preflight` 自动排队，不得另起 OCR 脚本或并行加载模型；取得执行槽后脚本会再次检查缓存。可从 `doctor.ocr_runtime.concurrency` 查看实际共享锁。
-
-先运行：
+默认 `photo-preflight` 只在本地完成 EXIF 方向、透明底白底化和尺寸压缩，不运行 RapidOCR、PaddleOCR 或本地 Qwen，也不占用 OCR 锁：
 
 ```powershell
-python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-preflight <图片路径> --formula-ocr auto --vision-mode auto --task grade --json
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-preflight <图片路径> --task grade --json
 ```
 
-`photo-preflight` 会检测用户已启动的 Qwen 服务，但不会自动启停模型。2026-08-11 的真实照片回归中，OCR 特化模型未通过严格 JSON 合同，通用模型超过 180 秒，因此配置默认关闭自动 Qwen 推理；日常 `auto` 继续使用 RapidOCR 与精确小图复核。只有显式诊断才用 `--vision-mode required`。返回中的 `review_route` 决定下一步；坏 JSON、代码围栏、越权字段或哈希错配一律拒绝，不得绕过质量门。
+返回 `review_route=remote_model_visual_review` 时，必须把全部 `preview_paths` 交给具备图片能力的 Codex/Kimi 等远端模型直接查看。DeepSeek 本身没有视觉能力时不得继续判图、不得依据历史 OCR 或文件名猜测，也不得执行 `grade-commit`；应把任务和预览路径交接给视觉模型。视觉模型完成判题后，DeepSeek 可以继续处理结构化保存、推荐和 PDF 等纯文本步骤。
+
+只有明确诊断 OCR 或本地服务时才使用：
+
+```powershell
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-preflight <图片路径> --preflight-mode ocr --formula-ocr off --vision-mode off --json
+```
+
+显式 OCR 模式仍经过三科共享执行锁；不得另起脚本绕过。`--formula-ocr paddle` 与 `--vision-mode required` 也必须同时指定 `--preflight-mode ocr`。
 
 以下命令仅用于诊断合同或单独校验历史响应，日常流程无需人工拼接：
 
@@ -79,34 +80,28 @@ python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-v
 python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-vlm-validate <本地模型响应.json> --packet <ocr-packet.json> --page 1 --json
 ```
 
-只有 `photo-vlm-validate` 输出的精简证据可以进入 DeepSeek 判题上下文。本地模型不得返回对错、标准答案、解题过程、错误原因或思维链；质量门为 `visual_review_required` 时，必须查看对应预览/裁剪或交给具备视觉能力的模型确认。
+历史本地模型响应只有通过 `photo-vlm-validate` 后才能作为辅助转录。本地模型不得返回对错、标准答案、解题过程、错误原因或思维链；它不再属于日常判题链路。
 
-日常判题直接读取命令返回的精简 `ocr_pages`、`question_ids`、预览路径和裁剪选择器，不要再次读取完整 `ocr-packet.json`。如果识别到题库编号，优先读取主库中的标准原题：
+日常判题由远端视觉模型直接读取命令返回的预览路径，不要再次读取完整 `ocr-packet.json`。如果视觉模型看见题库编号，可优先读取主库中的标准原题：
 
 ```powershell
 python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py question <题库编号> --compact --json
 ```
 
-随后按以下质量门分流：
-
-1. **可由 DeepSeek 继续判定**：印刷题干清晰；或已由题库编号取得标准原题；学生答案是无歧义的选择、数字或短文本；OCR 各处内容彼此一致；题意不依赖图形。
-2. **必须标记 `requires_visual_confirmation` 并停止保存**：关键公式、负号、指数、分母、等号或定义域置信度不足；连续手写推导；坐标图、几何图、辅助线；圈选不清；涂改或手写覆盖印刷文字；OCR 与题库原文或不同 OCR 候选冲突。
-3. FormulaNet 输出只是**不可信的 LaTeX 定位候选**。未经视觉复核，不得把它当作原题、学生步骤、答案或判错依据。
-4. OCR 不能替代数学审核。通过质量门后，DeepSeek 仍须完成逐题判定、首个实质错误定位和正确推导；不能确认的内容使用 `unclear`，不得补造。
-5. 只要存在 `requires_visual_confirmation`，不得执行 `grade-commit`，也不得保存错题或给出确定的对错结论；应请求清晰局部图、用户提供文字版答案，或交给具备视觉能力的智能体复核。
+远端视觉模型仍须逐题分开印刷题目与手写内容，定位第一处实质错误；关键公式、负号、指数、分母、图形或涂改看不清时必须请求清晰局部图，不得补造。DeepSeek 只能在视觉模型已经输出结构化可见证据和判题结果后接手后续流程。
 
 推荐执行链：
 
 ```text
 照片
-  → photo-preflight（RapidOCR先行；疑难页条件Qwen；可选FormulaNet）
+  → photo-preflight（仅方向/白底/尺寸控制）
+  → 远端视觉模型打开全部 preview_paths 并逐题判定
   → 识别到题库编号时读取 question --compact
-  → 按 review_route / quality_gate 分流
-      → 安全题：数学推理 → grade-preview → grade-commit
-      → 疑难题：requires_visual_confirmation → 停止保存并请求视觉复核
+  → grade-preview → grade-commit
+  → 看不清：停止保存并请求清晰局部图
 ```
 
-这套流程的目标是减少图片直接输入 Token，而不是降低判题证据标准。
+这套流程用较小且清晰的标准化图片控制输入成本，同时避免本地视觉/OCR的等待时间，不降低判题证据标准。
 
 ## 6. 不变量
 

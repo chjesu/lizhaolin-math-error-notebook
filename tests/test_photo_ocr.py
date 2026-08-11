@@ -132,12 +132,45 @@ class PhotoOCRConcurrencyTests(unittest.TestCase):
             self.root,
             out_dir=out_dir,
             formula_ocr="off",
+            preflight_mode="ocr",
             engine_factory=fail_engine_factory,
             lock_factory=CacheProducingLock,
         )
         self.assertTrue(result["cache_hit"])
         self.assertTrue(result["ocr_serialized"])
         self.assertEqual(result["ocr_lock_wait_seconds"], 0.25)
+
+    def test_remote_preview_mode_skips_ocr_engine_and_shared_lock(self) -> None:
+        from PIL import Image as PILImage
+
+        image_path = self.root / "large-question.png"
+        PILImage.new("RGBA", (3000, 1500), (0, 0, 0, 0)).save(image_path)
+
+        def fail_engine_factory():
+            raise AssertionError("remote preview mode must not load OCR")
+
+        def fail_lock_factory(_path: Path, _timeout: float):
+            raise AssertionError("remote preview mode must not acquire the OCR lock")
+
+        result = photo_ocr.process_photos(
+            [image_path],
+            self.root,
+            out_dir=self.root / "remote-preview",
+            max_side=2400,
+            preview_side=1600,
+            engine_factory=fail_engine_factory,
+            lock_factory=fail_lock_factory,
+        )
+
+        self.assertEqual(result["preflight_mode"], "remote")
+        self.assertFalse(result["ocr_serialized"])
+        self.assertEqual(result["ocr_pages"][0]["review_route"], "remote_model_visual_review")
+        preview_path = Path(result["preview_paths"][0])
+        self.assertTrue(preview_path.is_file())
+        with PILImage.open(preview_path) as preview:
+            self.assertEqual(preview.size, (1600, 800))
+            self.assertEqual(preview.mode, "RGB")
+            self.assertGreaterEqual(min(preview.getpixel((0, 0))), 250)
 
     def test_rapidocr_uses_bounded_onnx_threads(self) -> None:
         captured: dict[str, object] = {}

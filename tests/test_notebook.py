@@ -1353,6 +1353,7 @@ class NotebookTests(unittest.TestCase):
             max_side=600,
             preview_side=400,
             engine_factory=FakeEngine,
+            preflight_mode="ocr",
         )
         self.assertFalse(result["cache_hit"])
         self.assertEqual(result["pages"], 1)
@@ -1371,6 +1372,7 @@ class NotebookTests(unittest.TestCase):
             self.root,
             out_dir=out_dir,
             engine_factory=lambda: self.fail("cache should avoid OCR engine"),
+            preflight_mode="ocr",
         )
         self.assertTrue(cached["cache_hit"])
 
@@ -1453,6 +1455,7 @@ class NotebookTests(unittest.TestCase):
                 out_dir=self.root / "formula-ocr",
                 engine_factory=FakeEngine,
                 formula_ocr="auto",
+                preflight_mode="ocr",
             )
         packet = json.loads(Path(result["packet"]).read_text(encoding="utf-8"))
         self.assertEqual(result["formula_candidates"], 1)

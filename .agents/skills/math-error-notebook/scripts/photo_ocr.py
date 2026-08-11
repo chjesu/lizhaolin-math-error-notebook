@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Offline OCR preflight for photographed math work.
+"""Image preflight for photographed math work.
 
-The output is assistive evidence for a vision-capable model. OCR text must not
-replace inspection of mathematical notation, diagrams, or handwritten work.
+The default route only normalizes image size for direct review by a remote
+vision-capable grading model.  The slower OCR/local-VLM route remains available
+as an explicit diagnostic fallback.  OCR text must never replace inspection of
+mathematical notation, diagrams, or handwritten work.
 """
 
 from __future__ import annotations
@@ -41,6 +43,9 @@ LOCAL_VLM_MAX_RESPONSE_BYTES = 100_000
 OCR_LOCK_TIMEOUT_SECONDS = 900.0
 OCR_ONNX_MAX_THREADS = 4
 OCR_SHARED_LOCK_ENV = "LIZHAOLIN_OCR_SHARED_LOCK"
+REMOTE_PREVIEW_DEFAULT_MAX_SIDE = 2400
+REMOTE_PREVIEW_DEFAULT_SIDE = 2000
+REMOTE_PREVIEW_JPEG_QUALITY = 88
 BUNDLED_PYTHON = (
     Path.home() / ".cache" / "codex-runtimes" / "codex-primary-runtime"
     / "dependencies" / "python" / "python.exe"
@@ -762,6 +767,147 @@ def prepare_image(path: Path, max_side: int) -> tuple[Any, tuple[int, int]]:
         return image, original_size
 
 
+def prepare_remote_preview(
+    path: Path,
+    max_side: int,
+    preview_side: int,
+) -> tuple[Any, tuple[int, int], tuple[int, int]]:
+    """Flatten and resize one photo without loading OCR or altering its content."""
+    from PIL import Image, ImageOps
+
+    with Image.open(path) as source:
+        original_size = source.size
+        transposed = ImageOps.exif_transpose(source)
+        oriented_size = transposed.size
+        if "A" in transposed.getbands() or "transparency" in transposed.info:
+            rgba = transposed.convert("RGBA")
+            white = Image.new("RGBA", rgba.size, "white")
+            image = Image.alpha_composite(white, rgba).convert("RGB")
+        else:
+            image = transposed.convert("RGB")
+        image = _resize_to_limit(image, min(max_side, preview_side))
+        return image, original_size, oriented_size
+
+
+def _remote_preview_profile(
+    max_side: int,
+    preview_side: int,
+) -> dict[str, Any]:
+    return {
+        "preflight_mode": "remote",
+        "local_processing": "exif_transpose_white_background_resize_only",
+        "max_side": max_side,
+        "preview_side": preview_side,
+        "jpeg_quality": REMOTE_PREVIEW_JPEG_QUALITY,
+        "remote_visual_review_required": True,
+    }
+
+
+def _process_remote_previews(
+    image_paths: list[Path],
+    project_root: Path,
+    out_dir: Path | None,
+    max_side: int,
+    preview_side: int,
+    force: bool,
+) -> dict[str, Any]:
+    """Create compact previews for the calling remote model; run no OCR/VLM."""
+    paths = [path.resolve() for path in image_paths]
+    key = _batch_key(paths)
+    profile = _remote_preview_profile(max_side, preview_side)
+    if out_dir is None:
+        out_dir = project_root / "data" / "grade-inputs" / f"photo-{key}"
+    out_dir = out_dir.resolve()
+    packet_path = out_dir / "ocr-packet.json"
+    if not force:
+        cached = _cached_result(packet_path, profile)
+        if cached:
+            return cached
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pages: list[dict[str, Any]] = []
+    total_original_pixels = 0
+    total_preview_pixels = 0
+    for page_number, path in enumerate(paths, start=1):
+        image, original_size, oriented_size = prepare_remote_preview(
+            path, max_side, preview_side
+        )
+        page_dir = out_dir / f"page-{page_number:02d}"
+        page_dir.mkdir(parents=True, exist_ok=True)
+        preview_path = page_dir / "model-preview.jpg"
+        image.save(
+            preview_path,
+            "JPEG",
+            quality=REMOTE_PREVIEW_JPEG_QUALITY,
+            optimize=True,
+        )
+        total_original_pixels += original_size[0] * original_size[1]
+        total_preview_pixels += image.size[0] * image.size[1]
+        pages.append(
+            {
+                "page": page_number,
+                "source_path": str(path),
+                "source_sha256": _sha256(path),
+                "original_size": list(original_size),
+                "oriented_size": list(oriented_size),
+                "normalized_size": list(image.size),
+                "rotation_source": "exif_only",
+                "normalized_path": str(preview_path.resolve()),
+                "model_preview_path": str(preview_path.resolve()),
+                "ocr_text": "",
+                "ocr_line_count": 0,
+                "lines": [],
+                "detail_crops": [],
+                "formula_ocr": [],
+                "review_route": "remote_model_visual_review",
+            }
+        )
+
+    packet = {
+        "schema_version": 4,
+        "created_at": now_iso(),
+        "engine": "Pillow image normalization only",
+        "ocr_profile": profile,
+        "preflight_mode": "remote",
+        "purpose": "size_control_for_remote_math_photo_grading",
+        "batch_key": key,
+        "pages": pages,
+        "formula_ocr": {"status": "not_run", "device": None},
+        "local_visual_model": {
+            "status": "not_run",
+            "role": "disabled_for_routine_grading",
+        },
+        "warnings": [],
+        "model_workflow": [
+            "Open every model_preview_path with the remote vision-capable model.",
+            "Separate printed question content from the student's handwriting.",
+            "Request a clearer crop when any key symbol, diagram, or step is unreadable.",
+            "Do not claim visual review when the current model has no image capability.",
+        ],
+        "quality_rules": [
+            "Local processing changes size and file encoding only; it performs no OCR or grading.",
+            "Mathematical notation, diagrams, and handwriting require direct remote visual review.",
+            "Unreadable evidence must never be reconstructed silently.",
+        ],
+        "metrics": {
+            "ocr_characters": 0,
+            "detail_crops": 0,
+            "formula_candidates": 0,
+            "local_vlm_attempted_pages": 0,
+            "local_vlm_accepted_pages": 0,
+            "local_vlm_rejected_pages": 0,
+            "preview_pixel_ratio": (
+                round(total_preview_pixels / total_original_pixels, 4)
+                if total_original_pixels
+                else None
+            ),
+        },
+        "database_modified": False,
+    }
+    _write_json_atomic(packet_path, packet)
+    return _compact_result(packet, packet_path, cache_hit=False)
+
+
 def _box_size(box: list[list[float]]) -> tuple[float, float]:
     def distance(a: list[float], b: list[float]) -> float:
         return math.hypot(a[0] - b[0], a[1] - b[1])
@@ -1330,8 +1476,8 @@ def process_photos(
     image_paths: list[Path],
     project_root: Path,
     out_dir: Path | None = None,
-    max_side: int = 2400,
-    preview_side: int = 1100,
+    max_side: int = REMOTE_PREVIEW_DEFAULT_MAX_SIDE,
+    preview_side: int = REMOTE_PREVIEW_DEFAULT_SIDE,
     min_confidence: float = 0.86,
     max_detail_crops: int = 6,
     force: bool = False,
@@ -1339,21 +1485,41 @@ def process_photos(
     formula_ocr: str = "auto",
     vision_mode: str = "auto",
     task: str = "grade",
+    preflight_mode: str = "remote",
     lock_timeout_seconds: float = OCR_LOCK_TIMEOUT_SECONDS,
     lock_factory: Callable[[Path, float], Any] | None = None,
 ) -> dict[str, Any]:
-    """Run OCR through one machine-wide slot shared by all notebook sessions."""
+    """Prepare remote previews by default; run serialized OCR only on request."""
     paths = [path.resolve() for path in image_paths]
     missing = [str(path) for path in paths if not path.is_file()]
     if missing:
         raise ValueError("photo not found: " + ", ".join(missing))
     if not paths:
         raise ValueError("at least one photo is required")
+    if preflight_mode not in {"remote", "ocr"}:
+        raise ValueError("preflight_mode must be remote or ocr")
     key = _batch_key(paths)
     if vision_mode not in {"auto", "off", "required"}:
         raise ValueError("vision_mode must be auto, off, or required")
     if task not in {"grade", "verify"}:
         raise ValueError("task must be grade or verify")
+    if preflight_mode == "remote":
+        if formula_ocr == "paddle" or vision_mode == "required":
+            raise ValueError(
+                "formula_ocr=paddle and vision_mode=required need --preflight-mode ocr"
+            )
+        result = _process_remote_previews(
+            paths,
+            project_root,
+            out_dir,
+            max_side,
+            preview_side,
+            force,
+        )
+        result["ocr_serialized"] = False
+        result["ocr_lock_scope"] = None
+        result["ocr_lock_wait_seconds"] = 0.0
+        return result
     ocr_profile = _ocr_profile(formula_ocr, project_root, vision_mode, task)
     effective_out_dir = (
         out_dir.resolve()
@@ -1422,8 +1588,9 @@ def _compact_result(
             for match in re.findall(r"\bQ-[A-Za-z0-9]+\b", page.get("ocr_text", ""))
         }
     )
-    return {
+    result = {
         "status": "ok",
+        "preflight_mode": packet.get("preflight_mode", "ocr"),
         "packet": str(packet_path.resolve()),
         "pages": len(pages),
         "ocr_pages": ocr_pages,
@@ -1438,12 +1605,16 @@ def _compact_result(
         "local_visual_model": packet.get("local_visual_model", {}),
         "preview_pixel_ratio": packet.get("metrics", {}).get("preview_pixel_ratio"),
         "preview_paths": [page.get("model_preview_path") for page in pages],
-        "local_vlm_transcription": {
+        "cache_hit": cache_hit,
+        "database_modified": False,
+    }
+    if result["preflight_mode"] == "remote":
+        result["remote_visual_review_required"] = True
+    else:
+        result["local_vlm_transcription"] = {
             "prompt_version": LOCAL_VLM_PROMPT_VERSION,
             "prompt_path": str(LOCAL_VLM_PROMPT_PATH.resolve()),
             "role": "visual_transcription_only",
             "validator_command": "photo-vlm-validate",
-        },
-        "cache_hit": cache_hit,
-        "database_modified": False,
-    }
+        }
+    return result

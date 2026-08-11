@@ -3038,10 +3038,13 @@ AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
     "grade": {
         "critical_rules": [
             "end every grading response with an actionable 下一步: what to do now, how much, and what to submit next",
+            "a local visual model may only return validated transcription evidence; it must never grade or solve",
         ],
         "commands": [
             "behavior-cases --category grade --json",
             "photo-preflight <image...> --json",
+            "photo-vlm-contract --json when a local visual model is used",
+            "photo-vlm-validate <response.json> --packet <ocr-packet.json> --page <n> --json",
             "question <id> --compact --json when the sheet exposes a question ID",
             "causes --text <topic> --json",
             "knowledge --text <topic> --json",
@@ -3385,6 +3388,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true")
     p.add_argument("--json", action="store_true")
 
+    p = sub.add_parser(
+        "photo-vlm-contract",
+        help="show the fixed local visual-model transcription contract",
+    )
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser(
+        "photo-vlm-validate",
+        help="validate local visual-model JSON before photo grading",
+    )
+    p.add_argument("response", type=Path, help="local model JSON response")
+    p.add_argument("--packet", type=Path, help="photo-preflight ocr-packet.json")
+    p.add_argument("--page", type=int, default=1)
+    p.add_argument("--json", action="store_true")
+
     p = sub.add_parser("grade-commit", help="validate and store an error analysis")
     p.add_argument("analysis", type=Path, help="analysis JSON file")
     p.add_argument("--project-root", type=Path, default=Path.cwd())
@@ -3680,6 +3698,21 @@ def main(argv: list[str] | None = None) -> int:
                 max(0, min(args.max_detail_crops, 20)),
                 force=args.force,
                 formula_ocr=args.formula_ocr,
+            )
+            print_output(payload, args.json, args.pretty_json)
+            return 0
+        if args.command == "photo-vlm-contract":
+            from photo_ocr import local_vlm_contract
+
+            print_output(local_vlm_contract(), args.json, args.pretty_json)
+            return 0
+        if args.command == "photo-vlm-validate":
+            from photo_ocr import validate_local_vlm_response_file
+
+            payload = validate_local_vlm_response_file(
+                args.response,
+                packet_path=args.packet,
+                page_number=max(1, args.page),
             )
             print_output(payload, args.json, args.pretty_json)
             return 0

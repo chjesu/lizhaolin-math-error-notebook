@@ -19,6 +19,7 @@ import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -30,6 +31,10 @@ OCR_RUNTIME = PROJECT_ROOT / ".runtime" / "ocr"
 OCR_REQUIREMENTS = PROJECT_ROOT / "requirements-ocr.txt"
 PADDLE_WORKER = SCRIPT_DIR / "paddle_formula_worker.py"
 PADDLE_FORMULA_MODEL = "PP-FormulaNet_plus-M"
+LOCAL_VLM_PROMPT_VERSION = "math-photo-evidence-v1"
+LOCAL_VLM_SCHEMA_VERSION = "1"
+LOCAL_VLM_PROMPT_PATH = SKILL_DIR / "assets" / "local-vlm-transcription-prompt.txt"
+LOCAL_VLM_MAX_RESPONSE_BYTES = 100_000
 OCR_LOCK_TIMEOUT_SECONDS = 900.0
 OCR_ONNX_MAX_THREADS = 4
 OCR_SHARED_LOCK_ENV = "LIZHAOLIN_OCR_SHARED_LOCK"
@@ -41,6 +46,233 @@ MATH_CUE = re.compile(
     r"(?:[=<>≤≥±×÷√∑∫∞^_]|\\(?:frac|sqrt|sin|cos|tan|log|ln)|"
     r"\b(?:sin|cos|tan|log|ln)\b|[A-Za-z]\s*[+\-*/=])"
 )
+LOCAL_VLM_FORBIDDEN_KEYS = {
+    "verdict",
+    "correct_answer",
+    "standard_answer",
+    "solution",
+    "reasoning",
+    "analysis",
+    "error_cause",
+    "first_wrong_step",
+}
+
+
+def local_vlm_contract() -> dict[str, Any]:
+    """Return the versioned local-vision transcription contract."""
+    if not LOCAL_VLM_PROMPT_PATH.is_file():
+        raise RuntimeError(f"local VLM prompt is missing: {LOCAL_VLM_PROMPT_PATH}")
+    return {
+        "schema_version": LOCAL_VLM_SCHEMA_VERSION,
+        "prompt_version": LOCAL_VLM_PROMPT_VERSION,
+        "prompt_path": str(LOCAL_VLM_PROMPT_PATH.resolve()),
+        "role": "visual_transcription_only",
+        "consumer": "DeepSeek/Codex grading model",
+        "required_top_level_keys": [
+            "schema_version",
+            "prompt_version",
+            "source_sha256",
+            "question_blocks",
+            "warnings",
+            "requires_visual_confirmation",
+        ],
+        "forbidden_grading_keys": sorted(LOCAL_VLM_FORBIDDEN_KEYS),
+        "quality_rule": (
+            "The local model may transcribe visible evidence only; mathematical "
+            "judgment remains with the grading model."
+        ),
+    }
+
+
+def _require_string_or_none(value: Any, field: str) -> None:
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"{field} must be a string or null")
+
+
+def _reject_forbidden_keys(value: Any, path: str = "$") -> None:
+    if isinstance(value, dict):
+        forbidden = LOCAL_VLM_FORBIDDEN_KEYS.intersection(value)
+        if forbidden:
+            names = ", ".join(sorted(forbidden))
+            raise ValueError(f"local VLM output contains forbidden grading key(s) at {path}: {names}")
+        for key, item in value.items():
+            _reject_forbidden_keys(item, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _reject_forbidden_keys(item, f"{path}[{index}]")
+
+
+def _normalized_compare_text(value: str) -> str:
+    return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", value).lower()
+
+
+def validate_local_vlm_response(
+    payload: Any,
+    *,
+    expected_source_sha256: str | None = None,
+    rapidocr_text: str | None = None,
+) -> dict[str, Any]:
+    """Validate untrusted local-VLM JSON and return compact grading evidence."""
+    if not isinstance(payload, dict):
+        raise ValueError("local VLM response must be one JSON object")
+    _reject_forbidden_keys(payload)
+    required = set(local_vlm_contract()["required_top_level_keys"])
+    missing = sorted(required.difference(payload))
+    if missing:
+        raise ValueError("local VLM response is missing: " + ", ".join(missing))
+    if payload.get("schema_version") != LOCAL_VLM_SCHEMA_VERSION:
+        raise ValueError("unsupported local VLM schema_version")
+    if payload.get("prompt_version") != LOCAL_VLM_PROMPT_VERSION:
+        raise ValueError("unexpected local VLM prompt_version")
+    source_sha256 = payload.get("source_sha256")
+    if not isinstance(source_sha256, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", source_sha256):
+        raise ValueError("source_sha256 must contain 64 hexadecimal characters")
+    if expected_source_sha256 and source_sha256.lower() != expected_source_sha256.lower():
+        raise ValueError("local VLM response source_sha256 does not match the photo")
+    rotation = payload.get("rotation_degrees_ccw", 0)
+    if rotation not in {0, 90, 180, 270}:
+        raise ValueError("rotation_degrees_ccw must be 0, 90, 180, or 270")
+    warnings = payload.get("warnings")
+    if not isinstance(warnings, list) or not all(isinstance(item, str) for item in warnings):
+        raise ValueError("warnings must be an array of strings")
+    blocks = payload.get("question_blocks")
+    if not isinstance(blocks, list):
+        raise ValueError("question_blocks must be an array")
+
+    visual_reasons: list[str] = []
+    compact_blocks: list[dict[str, Any]] = []
+    printed_fragments: list[str] = []
+    for block_index, block in enumerate(blocks):
+        field = f"question_blocks[{block_index}]"
+        if not isinstance(block, dict):
+            raise ValueError(f"{field} must be an object")
+        for name in ("printed_question_number", "printed_stem", "student_final_answer"):
+            _require_string_or_none(block.get(name), f"{field}.{name}")
+        stem = block.get("printed_stem")
+        if stem:
+            printed_fragments.append(stem)
+        options = block.get("printed_options", [])
+        if not isinstance(options, list):
+            raise ValueError(f"{field}.printed_options must be an array")
+        for option_index, option in enumerate(options):
+            if not isinstance(option, dict) or not isinstance(option.get("label"), str) or not isinstance(option.get("text"), str):
+                raise ValueError(f"{field}.printed_options[{option_index}] must contain string label and text")
+            printed_fragments.extend((option["label"], option["text"]))
+        work = block.get("student_work", [])
+        if not isinstance(work, list):
+            raise ValueError(f"{field}.student_work must be an array")
+        for step_index, step in enumerate(work):
+            if not isinstance(step, dict):
+                raise ValueError(f"{field}.student_work[{step_index}] must be an object")
+            if not isinstance(step.get("order"), int) or not isinstance(step.get("text"), str):
+                raise ValueError(f"{field}.student_work[{step_index}] requires integer order and string text")
+            if step.get("certainty") not in {"clear", "uncertain"}:
+                raise ValueError(f"{field}.student_work[{step_index}].certainty must be clear or uncertain")
+            if step["certainty"] == "uncertain":
+                visual_reasons.append("uncertain_handwriting")
+        unclear = block.get("unclear_items", [])
+        if not isinstance(unclear, list) or not all(isinstance(item, str) for item in unclear):
+            raise ValueError(f"{field}.unclear_items must be an array of strings")
+        if unclear:
+            visual_reasons.append("unclear_items")
+        diagram = block.get("diagram", {"present": False, "visible_facts": []})
+        if not isinstance(diagram, dict) or not isinstance(diagram.get("present"), bool):
+            raise ValueError(f"{field}.diagram must contain boolean present")
+        facts = diagram.get("visible_facts", [])
+        if not isinstance(facts, list) or not all(isinstance(item, str) for item in facts):
+            raise ValueError(f"{field}.diagram.visible_facts must be an array of strings")
+        if diagram["present"]:
+            visual_reasons.append("diagram_present")
+        compact_blocks.append(
+            {
+                "printed_question_number": block.get("printed_question_number"),
+                "printed_stem": stem,
+                "printed_options": options,
+                "student_work": work,
+                "student_final_answer": block.get("student_final_answer"),
+                "diagram": {"present": diagram["present"], "visible_facts": facts},
+                "unclear_items": unclear,
+            }
+        )
+
+    if warnings:
+        visual_reasons.append("model_warnings")
+    if rapidocr_text:
+        left = _normalized_compare_text("".join(printed_fragments))
+        right = _normalized_compare_text(rapidocr_text)
+        if len(left) >= 12 and len(right) >= 12:
+            agreement = SequenceMatcher(None, left, right).ratio()
+            if agreement < 0.18:
+                visual_reasons.append("rapidocr_disagreement")
+        else:
+            agreement = None
+    else:
+        agreement = None
+    declared_visual = payload.get("requires_visual_confirmation")
+    if not isinstance(declared_visual, bool):
+        raise ValueError("requires_visual_confirmation must be boolean")
+    if declared_visual:
+        visual_reasons.append("model_requested_visual_review")
+    visual_reasons = sorted(set(visual_reasons))
+    requires_visual = bool(visual_reasons)
+    return {
+        "status": "ok",
+        "schema_version": LOCAL_VLM_SCHEMA_VERSION,
+        "prompt_version": LOCAL_VLM_PROMPT_VERSION,
+        "source_sha256": source_sha256.lower(),
+        "rotation_degrees_ccw": rotation,
+        "question_blocks": compact_blocks,
+        "warnings": warnings,
+        "rapidocr_agreement": round(agreement, 4) if agreement is not None else None,
+        "quality_gate": "visual_review_required" if requires_visual else "pass",
+        "requires_visual_confirmation": requires_visual,
+        "visual_review_reasons": visual_reasons,
+        "database_modified": False,
+    }
+
+
+def validate_local_vlm_response_file(
+    response_path: Path,
+    *,
+    packet_path: Path | None = None,
+    page_number: int = 1,
+) -> dict[str, Any]:
+    """Load and validate one local-VLM response against an OCR packet page."""
+    response_path = response_path.resolve()
+    if not response_path.is_file():
+        raise ValueError(f"local VLM response not found: {response_path}")
+    if response_path.stat().st_size > LOCAL_VLM_MAX_RESPONSE_BYTES:
+        raise ValueError("local VLM response exceeds the 100 KB safety limit")
+    raw = response_path.read_text(encoding="utf-8-sig").strip()
+    if raw.startswith("```") or raw.endswith("```") or "<think>" in raw.lower():
+        raise ValueError("local VLM response must contain JSON only, without fences or thinking text")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"local VLM response is not valid JSON: {exc.msg}") from exc
+
+    expected_sha256: str | None = None
+    rapidocr_text: str | None = None
+    if packet_path is not None:
+        packet_path = packet_path.resolve()
+        if not packet_path.is_file():
+            raise ValueError(f"OCR packet not found: {packet_path}")
+        packet = json.loads(packet_path.read_text(encoding="utf-8-sig"))
+        pages = packet.get("pages") or []
+        matches = [page for page in pages if page.get("page") == page_number]
+        if len(matches) != 1:
+            raise ValueError(f"OCR packet does not contain page {page_number}")
+        expected_sha256 = matches[0].get("source_sha256")
+        rapidocr_text = matches[0].get("ocr_text")
+    result = validate_local_vlm_response(
+        payload,
+        expected_source_sha256=expected_sha256,
+        rapidocr_text=rapidocr_text,
+    )
+    result["response_path"] = str(response_path)
+    result["ocr_packet"] = str(packet_path) if packet_path else None
+    result["page"] = page_number if packet_path else None
+    return result
 
 
 def now_iso() -> str:
@@ -779,6 +1011,7 @@ def _process_photos_unlocked(
         "warnings": [formula_warning] if formula_warning else [],
         "model_workflow": [
             "Read ocr_text before opening an image.",
+            "If a local visual model is used, apply only the versioned transcription prompt and validate its JSON before grading.",
             "Use formula_ocr LaTeX as a locator, not as trusted transcription.",
             "Open model_preview_path to separate printed question from handwriting.",
             "Open only relevant detail_crops when a formula or step is ambiguous.",
@@ -906,6 +1139,12 @@ def _compact_result(
         "formula_ocr_device": packet.get("formula_ocr", {}).get("device"),
         "preview_pixel_ratio": packet.get("metrics", {}).get("preview_pixel_ratio"),
         "preview_paths": [page.get("model_preview_path") for page in pages],
+        "local_vlm_transcription": {
+            "prompt_version": LOCAL_VLM_PROMPT_VERSION,
+            "prompt_path": str(LOCAL_VLM_PROMPT_PATH.resolve()),
+            "role": "visual_transcription_only",
+            "validator_command": "photo-vlm-validate",
+        },
         "cache_hit": cache_hit,
         "database_modified": False,
     }

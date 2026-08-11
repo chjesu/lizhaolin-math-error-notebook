@@ -39,6 +39,25 @@ require the formula stage. Read `formula_ocr` as an untrusted LaTeX locator.
 Never accept its Chinese text or mathematical notation without checking the
 referenced crop.
 
+When a local visual model is available, it may replace repeated remote image
+input only as a **transcription layer**. Get the fixed, versioned prompt contract
+from the authoritative CLI, give that prompt plus one preview/crop and its
+`source_sha256` to the local model, then validate the JSON before the grading
+model reads it:
+
+```powershell
+python -X utf8 -B <skill-dir>\scripts\notebook.py photo-vlm-contract --json
+python -X utf8 -B <skill-dir>\scripts\notebook.py photo-vlm-validate <response.json> --packet <ocr-packet.json> --page 1 --json
+```
+
+The local model is forbidden to solve, grade, supply a standard answer, diagnose
+an error, or emit chain-of-thought. The validator rejects grading fields, wrong
+prompt/schema versions, non-JSON wrappers, and source-hash mismatches. It also
+compares printed transcription with RapidOCR and returns either `quality_gate=pass`
+or `visual_review_required`. Only the validated compact JSON may enter the
+DeepSeek/Codex grading context; it does not relax visual review for ambiguous
+formulae, handwriting, or diagrams.
+
 2. Separate printed content from handwriting; reconstruct steps and identify the first substantive error.
 3. If a key symbol, condition, diagram, or step is unreadable, state it and request a clearer crop. Never fabricate. Use `unclear` for insufficient evidence; use `careless` only with direct evidence.
 4. Get compact codes instead of loading full catalogs:

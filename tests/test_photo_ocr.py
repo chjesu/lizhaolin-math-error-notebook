@@ -165,5 +165,71 @@ class PhotoOCRConcurrencyTests(unittest.TestCase):
         self.assertEqual(list(self.root.glob(".*.tmp")), [])
 
 
+class LocalVLMTranscriptionContractTests(unittest.TestCase):
+    SHA256 = "a" * 64
+
+    @classmethod
+    def valid_payload(cls) -> dict[str, object]:
+        return {
+            "schema_version": "1",
+            "prompt_version": "math-photo-evidence-v1",
+            "source_sha256": cls.SHA256,
+            "rotation_degrees_ccw": 0,
+            "question_blocks": [
+                {
+                    "printed_question_number": "3",
+                    "printed_stem": "已知 $x^2-y^2=2$，求值。",
+                    "printed_options": [],
+                    "student_work": [
+                        {"order": 1, "text": "$x^2-y^2=2$", "certainty": "clear"}
+                    ],
+                    "student_final_answer": "2",
+                    "diagram": {"present": False, "visible_facts": []},
+                    "unclear_items": [],
+                }
+            ],
+            "warnings": [],
+            "requires_visual_confirmation": False,
+        }
+
+    def test_contract_uses_versioned_fixed_prompt(self) -> None:
+        contract = photo_ocr.local_vlm_contract()
+        prompt_path = Path(contract["prompt_path"])
+        prompt = prompt_path.read_text(encoding="utf-8")
+        self.assertEqual(contract["prompt_version"], "math-photo-evidence-v1")
+        self.assertIn("不判断对错", prompt)
+        self.assertIn("只返回下面结构的一个 JSON 对象", prompt)
+
+    def test_valid_transcription_passes_without_grading_fields(self) -> None:
+        result = photo_ocr.validate_local_vlm_response(
+            self.valid_payload(),
+            expected_source_sha256=self.SHA256,
+            rapidocr_text="3 已知 x2-y2=2 求值",
+        )
+        self.assertEqual(result["quality_gate"], "pass")
+        self.assertFalse(result["requires_visual_confirmation"])
+        self.assertNotIn("solution", result)
+
+    def test_grading_key_is_rejected(self) -> None:
+        payload = self.valid_payload()
+        payload["verdict"] = "correct"
+        with self.assertRaisesRegex(ValueError, "forbidden grading key"):
+            photo_ocr.validate_local_vlm_response(payload)
+
+    def test_uncertain_handwriting_forces_visual_review(self) -> None:
+        payload = self.valid_payload()
+        payload["question_blocks"][0]["student_work"][0]["certainty"] = "uncertain"
+        result = photo_ocr.validate_local_vlm_response(payload)
+        self.assertEqual(result["quality_gate"], "visual_review_required")
+        self.assertIn("uncertain_handwriting", result["visual_review_reasons"])
+
+    def test_response_file_rejects_markdown_fence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            response = Path(directory) / "response.json"
+            response.write_text("```json\n{}\n```", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "JSON only"):
+                photo_ocr.validate_local_vlm_response_file(response)
+
+
 if __name__ == "__main__":
     unittest.main()

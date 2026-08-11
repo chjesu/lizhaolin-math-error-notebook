@@ -11,7 +11,7 @@
 - 错题记录：`25`；到期复习阶段：`110`
 - 主执行器：`.agents/skills/math-error-notebook/scripts/notebook.py`
 - 组卷与打印：`.agents/skills/math-error-notebook/scripts/practice_sheet.py`
-- 照片 OCR 预检：`notebook.py photo-preflight`（RapidOCR 主流程位于 `photo_ocr.py`；隔离的 PaddleGPU 公式识别位于 `paddle_formula_worker.py`）
+- 照片 OCR 预检：`notebook.py photo-preflight`（RapidOCR 主流程位于 `photo_ocr.py`；隔离的 PaddleGPU 公式识别位于 `paddle_formula_worker.py`；本地视觉模型只按版本化固定提示词转录，结果经 `photo-vlm-validate` 校验后才进入判题上下文）
 - 默认打印机：`EPSON72097C (L3250 Series)`
 
 数量是 2026-08-08 的实施前快照；实际状态以 `bank-info --json` 为准。
@@ -153,6 +153,8 @@ flowchart TD
 | 行为标准 | `behavior-cases` | 按任务列出跨模型标准案例；只在需要时加载单个完整案例 |
 | 可恢复流程 | `workflow-start` / `workflow-update` / `workflow-status` | 在 `data/workflows/` 保存步骤、产物和断点，不重复已完成阶段 |
 | 照片预检 | `photo-preflight` | RapidOCR 离线方向纠正、文本、缓存、小预览及疑难裁剪；精简返回直接包含 OCR 正文、题号和裁剪选择器，例行判题不得再读取完整 OCR 包；`--formula-ocr auto|off|paddle` 可让隔离的 PaddleGPU 仅处理小裁剪。公式候选不可信任，不写主库，不替代视觉和数学判断 |
+| 本地视觉转录契约 | `photo-vlm-contract` | 返回固定提示词的位置、版本、必填字段和禁止字段；本地模型只转录可见证据，不得判题或给答案 |
+| 本地视觉转录质量门 | `photo-vlm-validate` | 将本地模型 JSON 与 `ocr-packet.json` 页面的图片哈希及 RapidOCR 文本绑定；拒绝越权字段、错误版本、非 JSON 包装和图片错配，输出精简证据或升级视觉复核 |
 | 初始化 | `init` | 创建 schema、装载知识点；主库存在时不得用来重建数据 |
 | 初始化 | `seed` | 幂等导入项目原创种子题，仅用于首次建库 |
 | 题库身份 | `bank-info` | 主库绝对路径、SHA256、schema、完整性、外键和数量 |
@@ -213,6 +215,7 @@ flowchart TD
 - 公式增强固定在 `.runtime/paddleocr`，模型与缓存固定在 `.runtime/paddle-home`，依赖由 `requirements-paddleocr.txt` 锁定；不得安装到系统 Python 或新建另一套照片入口。
 - `auto` 模式在 Paddle 不可用或运行失败时保留 RapidOCR 结果并写入警告；`paddle` 模式用于诊断，公式阶段失败即报错。
 - `ocr-packet.json` 缓存记录 OCR profile；运行时能力变化会自动重建旧缓存。缓存公式必须保留裁剪路径、坐标及 `requires_visual_confirmation=true`。
+- 固定视觉转录提示词位于 `.agents/skills/math-error-notebook/assets/local-vlm-transcription-prompt.txt`。本地视觉模型只接收单页预览或疑难裁剪，并返回 `math-photo-evidence-v1` JSON；不得把自由文本或模型判定直接拼入 DeepSeek/Codex 上下文。`photo-vlm-validate` 负责结构、禁止字段、来源 SHA256 和 RapidOCR 一致性质量门。
 - `doctor --json` 同时报告 `ocr_runtime` 与 `formula_ocr_runtime`，含模型是否已缓存。
 - 三科错题本共用一个整机级跨进程 OCR 执行锁，默认位于 `%TEMP%/LiZhaolinErrorNotebooks/locks/photo-ocr.lock`；系统临时目录是 Codex 沙箱允许三科共同写入的位置，也可用绝对路径环境变量 `LIZHAOLIN_OCR_SHARED_LOCK` 覆盖。锁覆盖 RapidOCR、裁剪生成和 Paddle 公式识别，避免不同项目或不同会话同时加载模型。等待前与取得锁后各检查一次本项目缓存，输出包使用原子替换写入；`doctor.ocr_runtime.concurrency` 报告实际锁路径、范围、超时和线程上限。
 - CLI：`print_output`、`build_parser`、`main`

@@ -69,6 +69,15 @@ python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py agent-c
 python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-preflight <图片路径> --formula-ocr auto --json
 ```
 
+若本机视觉模型可用，不要让 DeepSeek 直接反复接收整张照片，也不要让本地模型判题。先读取固定契约，将其中的提示词与单页预览/疑难裁剪交给本地模型，再校验返回的纯 JSON：
+
+```powershell
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-vlm-contract --json
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-vlm-validate <本地模型响应.json> --packet <ocr-packet.json> --page 1 --json
+```
+
+只有 `photo-vlm-validate` 输出的精简证据可以进入 DeepSeek 判题上下文。本地模型不得返回对错、标准答案、解题过程、错误原因或思维链；质量门为 `visual_review_required` 时，必须查看对应预览/裁剪或交给具备视觉能力的模型确认。
+
 日常判题直接读取命令返回的精简 `ocr_pages`、`question_ids`、预览路径和裁剪选择器，不要再次读取完整 `ocr-packet.json`。如果识别到题库编号，优先读取主库中的标准原题：
 
 ```powershell

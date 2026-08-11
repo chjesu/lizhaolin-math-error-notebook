@@ -372,7 +372,7 @@ def infer_question_features(stem: str, question_type: str | None = None) -> list
     qtype = (question_type or "").casefold()
     if "多选" in qtype or "多项选择" in qtype:
         features.add("multiple-choice")
-    elif "选择" in qtype:
+    elif "单选" in qtype or "单项选择" in qtype or "选择" in qtype:
         features.add("single-choice")
     elif "填空" in qtype:
         features.add("fill-blank")

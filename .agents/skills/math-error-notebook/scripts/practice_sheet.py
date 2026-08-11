@@ -219,7 +219,7 @@ def _cause_name(cause_code: str | None) -> str:
 
 
 MATH_CACHE_DIR = PROJECT_ROOT / "tmp" / "pdfs" / "math"
-MATH_CACHE_VERSION = "v2"
+MATH_CACHE_VERSION = "v3"
 _MATH_REGISTRY: dict[str, tuple[str, bool]] = {}
 _MATH_COUNTER = itertools.count()
 _HAS_CJK = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿＀-￯]")
@@ -289,6 +289,42 @@ def _extract_math(text: str) -> str:
         latex = text[i + len(opener):k]
         out.append(_register_math(latex, display) if latex.strip() else "")
         i = k + len(closer)
+    value = "".join(out)
+
+    # Historical error stems sometimes contain complete LaTeX fractions without
+    # surrounding math delimiters, for example ``\frac{17}{16}`` or
+    # ``\frac{\sqrt6}{2}``. Keep the whole two-argument command together so it
+    # reaches mathtext instead of degrading to plain ``(17)/(16)`` text. This
+    # intentionally targets only explicit TeX fraction commands; prose slashes
+    # and dates remain untouched.
+    out = []
+    i = 0
+    while i < len(value):
+        if value[i] != "\\":
+            out.append(value[i])
+            i += 1
+            continue
+        command = next(
+            (name for name in _FRAC_STYLE_COMMANDS if value.startswith(name, i)),
+            None,
+        )
+        if command is None:
+            out.append(value[i])
+            i += 1
+            continue
+        after = i + len(command)
+        if after < len(value) and value[after].isalpha():
+            out.append(value[i])
+            i += 1
+            continue
+        first = _read_math_token(value, after)
+        second = _read_math_token(value, first[1]) if first else None
+        if not first or not second:
+            out.append(value[i])
+            i += 1
+            continue
+        out.append(_register_math(command + first[0] + second[0]))
+        i = second[1]
     value = "".join(out)
 
     token = "\\sqrt{"
@@ -404,7 +440,10 @@ def _normalize_math_args(latex: str) -> str:
             if token is None:
                 ok = False
                 break
-            args.append(token[0])
+            argument = token[0]
+            if argument.startswith("{") and argument.endswith("}"):
+                argument = "{" + _normalize_math_args(argument[1:-1]) + "}"
+            args.append(argument)
             j = token[1]
         if not ok:
             out.append(latex[i])

@@ -11,13 +11,20 @@
   },
   "local_visual_model": {
     "enabled": false,
-    "strategy": "diagnostic_only_remote_model_direct_for_routine_grading",
+    "strategy": "rapidocr_primary_remote_visual_for_formula_diagram_local_vlm_diagnostic_only",
     "auto_inference_enabled": false,
-    "auto_inference_note": "2026-08-11 decision: routine grading uses size-controlled previews and direct remote vision; local Qwen is diagnostic-only because of latency",
+    "auto_inference_note": "2026-08-11 controlled benchmark: Qwen, InternVL and DeepSeek-OCR hallucinated or violated the evidence contract on math formulas/diagrams. RapidOCR is the local first pass; Paddle formula OCR is explicit tight-crop assistance only; remote vision performs final formula, diagram and handwriting review.",
     "model_name": "Qwen2.5-VL-7B-Instruct-OCR-4bit",
     "endpoint": "http://127.0.0.1:7863",
     "client_python": "C:/Users/Administrator/Documents/Codex/InternVL2-8B/venv/Scripts/python.exe",
     "request_timeout_seconds": 150,
     "max_new_tokens": 1536
+  },
+  "verification_vision": {
+    "local_text_first_pass": "RapidOCR 3.9.2 / PP-OCRv6",
+    "formula_ocr": "explicit_tight_crop_only",
+    "diagram_formula_handwriting_final_review": "remote_visual_model",
+    "local_vlm_auto_approval": false,
+    "benchmark_report": "docs/LOCAL_VISION_AUDIT_BENCHMARK.md"
   }
 }

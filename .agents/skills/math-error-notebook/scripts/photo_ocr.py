@@ -18,6 +18,8 @@ import sys
 import tempfile
 import time
 import uuid
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -31,6 +33,7 @@ OCR_RUNTIME = PROJECT_ROOT / ".runtime" / "ocr"
 OCR_REQUIREMENTS = PROJECT_ROOT / "requirements-ocr.txt"
 PADDLE_WORKER = SCRIPT_DIR / "paddle_formula_worker.py"
 PADDLE_FORMULA_MODEL = "PP-FormulaNet_plus-M"
+LOCAL_VLM_CLIENT = SCRIPT_DIR / "local_vlm_client.py"
 LOCAL_VLM_PROMPT_VERSION = "math-photo-evidence-v1"
 LOCAL_VLM_SCHEMA_VERSION = "1"
 LOCAL_VLM_PROMPT_PATH = SKILL_DIR / "assets" / "local-vlm-transcription-prompt.txt"
@@ -181,8 +184,6 @@ def validate_local_vlm_response(
         facts = diagram.get("visible_facts", [])
         if not isinstance(facts, list) or not all(isinstance(item, str) for item in facts):
             raise ValueError(f"{field}.diagram.visible_facts must be an array of strings")
-        if diagram["present"]:
-            visual_reasons.append("diagram_present")
         compact_blocks.append(
             {
                 "printed_question_number": block.get("printed_question_number"),
@@ -618,14 +619,81 @@ def _batch_key(paths: Iterable[Path]) -> str:
     return digest.hexdigest()[:16]
 
 
-def _ocr_profile(formula_ocr: str, project_root: Path) -> dict[str, Any]:
+def _local_vlm_config(project_root: Path) -> dict[str, Any]:
+    config_path = project_root / "config" / "math-error-notebook.json"
+    if not config_path.is_file():
+        return {}
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    config = payload.get("local_visual_model") if isinstance(payload, dict) else None
+    return dict(config) if isinstance(config, dict) else {}
+
+
+def _local_vlm_service_available(config: dict[str, Any]) -> bool:
+    if not config.get("enabled"):
+        return False
+    endpoint = str(config.get("endpoint") or "").rstrip("/")
+    client_python = Path(str(config.get("client_python") or ""))
+    if not endpoint or not client_python.is_file() or not LOCAL_VLM_CLIENT.is_file():
+        return False
+    try:
+        with urllib.request.urlopen(endpoint + "/", timeout=0.75) as response:
+            return 200 <= int(response.status) < 500
+    except (OSError, urllib.error.URLError, ValueError):
+        return False
+
+
+def local_vlm_runtime_status(project_root: Path) -> dict[str, Any]:
+    """Return a compact, read-only status for the configured visual service."""
+    config = _local_vlm_config(project_root)
+    enabled = bool(config.get("enabled"))
+    endpoint = str(config.get("endpoint") or "").rstrip("/") or None
+    client_python = Path(str(config.get("client_python") or ""))
+    return {
+        "enabled": enabled,
+        "auto_inference_enabled": bool(config.get("auto_inference_enabled")),
+        "auto_inference_note": config.get("auto_inference_note"),
+        "strategy": config.get("strategy"),
+        "model_name": config.get("model_name"),
+        "endpoint": endpoint,
+        "client_python_available": client_python.is_file(),
+        "client_script_available": LOCAL_VLM_CLIENT.is_file(),
+        "service_available": _local_vlm_service_available(config) if enabled else False,
+        "role": "visual_transcription_only",
+    }
+
+
+def _ocr_profile(
+    formula_ocr: str,
+    project_root: Path,
+    vision_mode: str = "auto",
+    task: str = "grade",
+) -> dict[str, Any]:
     effective_formula_ocr = _formula_ocr_mode(formula_ocr, project_root)
+    config = _local_vlm_config(project_root)
+    local_enabled = bool(config.get("enabled")) and vision_mode != "off"
+    auto_inference = bool(config.get("auto_inference_enabled"))
+    should_probe = local_enabled and (vision_mode == "required" or auto_inference)
+    local_available = _local_vlm_service_available(config) if should_probe else False
     return {
         "rapidocr": "3.9.2 / PP-OCRv6",
         "formula_ocr_requested": formula_ocr,
         "formula_ocr_effective": effective_formula_ocr,
         "formula_model": (
             PADDLE_FORMULA_MODEL if effective_formula_ocr == "paddle" else None
+        ),
+        "vision_mode_requested": vision_mode,
+        "vision_task": task,
+        "local_vlm_enabled": local_enabled,
+        "local_vlm_auto_inference_enabled": (
+            auto_inference if local_enabled else False
+        ),
+        "local_vlm_available": local_available,
+        "local_vlm_model": config.get("model_name") if local_enabled else None,
+        "local_vlm_prompt_version": (
+            LOCAL_VLM_PROMPT_VERSION if local_enabled else None
         ),
     }
 
@@ -856,6 +924,199 @@ def _load_engine() -> Any:
         logger.disabled = was_disabled
 
 
+def _local_vlm_trigger_reasons(page: dict[str, Any], task: str) -> list[str]:
+    """Select only pages where local visual transcription is worth its latency."""
+    reasons: list[str] = []
+    text = str(page.get("ocr_text") or "").strip()
+    confidence = page.get("mean_confidence")
+    crop_threshold = 0.82 if task == "grade" else 0.7
+    low_confidence_crops = [
+        crop
+        for crop in page.get("detail_crops", [])
+        if crop.get("reason") == "low_ocr_confidence"
+        or (
+            crop.get("confidence") is not None
+            and float(crop["confidence"]) < crop_threshold
+        )
+    ]
+    threshold = 0.9 if task == "grade" else 0.78
+    minimum_characters = 80 if task == "grade" else 20
+    if confidence is None or float(confidence) < threshold:
+        reasons.append("low_mean_ocr_confidence")
+    if len(text) < minimum_characters:
+        reasons.append("little_rapidocr_text")
+    if low_confidence_crops:
+        reasons.append("low_confidence_regions")
+    return reasons
+
+
+def _run_local_vlm_page(
+    page: dict[str, Any],
+    page_dir: Path,
+    project_root: Path,
+    rapidocr_text: str,
+) -> dict[str, Any]:
+    config = _local_vlm_config(project_root)
+    endpoint = str(config.get("endpoint") or "").rstrip("/")
+    client_python = Path(str(config.get("client_python") or ""))
+    raw_path = page_dir / "local-vlm-response.json"
+    timeout = max(15, min(int(config.get("request_timeout_seconds") or 150), 600))
+    max_tokens = max(256, min(int(config.get("max_new_tokens") or 1536), 4096))
+    command = [
+        str(client_python),
+        "-X",
+        "utf8",
+        "-B",
+        str(LOCAL_VLM_CLIENT),
+        "--url",
+        endpoint,
+        "--image",
+        str(page["normalized_path"]),
+        "--prompt",
+        str(LOCAL_VLM_PROMPT_PATH),
+        "--source-sha256",
+        str(page["source_sha256"]),
+        "--output",
+        str(raw_path),
+        "--max-new-tokens",
+        str(max_tokens),
+    ]
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "status": "failed",
+            "quality_gate": "visual_review_required",
+            "error": f"local VLM request failed: {exc}",
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+        }
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()[-800:]
+        return {
+            "status": "failed",
+            "quality_gate": "visual_review_required",
+            "error": "local VLM client failed" + (f": {detail}" if detail else ""),
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+        }
+    try:
+        raw = raw_path.read_text(encoding="utf-8-sig").strip()
+        if raw.startswith("```") or raw.endswith("```") or "<think>" in raw.lower():
+            raise ValueError("response is not JSON-only")
+        payload = json.loads(raw)
+        evidence = validate_local_vlm_response(
+            payload,
+            expected_source_sha256=str(page["source_sha256"]),
+            rapidocr_text=rapidocr_text,
+        )
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return {
+            "status": "rejected",
+            "quality_gate": "visual_review_required",
+            "error": str(exc),
+            "raw_response_path": str(raw_path.resolve()) if raw_path.is_file() else None,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+        }
+    return {
+        "status": "accepted",
+        "quality_gate": evidence["quality_gate"],
+        "evidence": evidence,
+        "raw_response_path": str(raw_path.resolve()),
+        "elapsed_seconds": round(time.monotonic() - started, 3),
+    }
+
+
+def _apply_local_vlm(
+    pages: list[dict[str, Any]],
+    out_dir: Path,
+    project_root: Path,
+    vision_mode: str,
+    task: str,
+) -> dict[str, Any]:
+    config = _local_vlm_config(project_root)
+    enabled = bool(config.get("enabled")) and vision_mode != "off"
+    auto_inference = bool(config.get("auto_inference_enabled"))
+    available = (
+        _local_vlm_service_available(config)
+        if enabled and (vision_mode == "required" or auto_inference)
+        else False
+    )
+    summary: dict[str, Any] = {
+        "status": "disabled" if not enabled else "ready",
+        "mode": vision_mode,
+        "task": task,
+        "model_name": config.get("model_name") if enabled else None,
+        "service_available": available,
+        "attempted_pages": 0,
+        "accepted_pages": 0,
+        "rejected_pages": 0,
+        "skipped_pages": 0,
+        "role": "visual_transcription_only",
+    }
+    if not enabled:
+        for page in pages:
+            page["review_route"] = "rapidocr_then_model_visual_review"
+        return summary
+    if vision_mode == "auto" and not auto_inference:
+        summary["status"] = "auto_inference_disabled_after_benchmark"
+        summary["benchmark_note"] = config.get("auto_inference_note")
+        for page in pages:
+            page["review_route"] = "rapidocr_then_model_visual_review"
+        return summary
+    if not available:
+        if vision_mode == "required":
+            raise RuntimeError("local visual model is required but its service is unavailable")
+        summary["status"] = "service_unavailable_fallback"
+        for page in pages:
+            page["review_route"] = "rapidocr_fallback_local_vlm_unavailable"
+        return summary
+    for page in pages:
+        trigger_reasons = (
+            ["explicitly_required"]
+            if vision_mode == "required"
+            else _local_vlm_trigger_reasons(page, task)
+        )
+        page["local_vlm_trigger_reasons"] = trigger_reasons
+        if not trigger_reasons:
+            page["review_route"] = "rapidocr_then_model_visual_review"
+            summary["skipped_pages"] += 1
+            continue
+        summary["attempted_pages"] += 1
+        page_dir = out_dir / f"page-{int(page['page']):02d}"
+        result = _run_local_vlm_page(
+            page,
+            page_dir,
+            project_root,
+            str(page.get("ocr_text") or ""),
+        )
+        page["local_vlm"] = result
+        if result["status"] == "accepted":
+            summary["accepted_pages"] += 1
+            page["review_route"] = (
+                "local_vlm_evidence_then_reasoning_model"
+                if result["quality_gate"] == "pass"
+                else "local_vlm_evidence_plus_model_visual_review"
+            )
+        else:
+            summary["rejected_pages"] += 1
+            page["review_route"] = "rapidocr_plus_model_visual_review"
+    if summary["rejected_pages"]:
+        summary["status"] = "partial_fallback"
+    elif summary["attempted_pages"]:
+        summary["status"] = "completed"
+    else:
+        summary["status"] = "not_needed"
+    return summary
+
+
 def _process_photos_unlocked(
     image_paths: list[Path],
     project_root: Path,
@@ -867,6 +1128,8 @@ def _process_photos_unlocked(
     force: bool = False,
     engine_factory: Callable[[], Any] | None = None,
     formula_ocr: str = "auto",
+    vision_mode: str = "auto",
+    task: str = "grade",
 ) -> dict[str, Any]:
     paths = [path.resolve() for path in image_paths]
     missing = [str(path) for path in paths if not path.is_file()]
@@ -876,7 +1139,7 @@ def _process_photos_unlocked(
         raise ValueError("at least one photo is required")
 
     key = _batch_key(paths)
-    ocr_profile = _ocr_profile(formula_ocr, project_root)
+    ocr_profile = _ocr_profile(formula_ocr, project_root, vision_mode, task)
     effective_formula_ocr = str(ocr_profile["formula_ocr_effective"])
     if out_dir is None:
         out_dir = project_root / "data" / "grade-inputs" / f"photo-{key}"
@@ -990,8 +1253,24 @@ def _process_photos_unlocked(
         )
         formula_count += 1
 
+    local_vlm_summary = _apply_local_vlm(
+        pages,
+        out_dir,
+        project_root,
+        vision_mode,
+        task,
+    )
+    local_vlm_warning = None
+    if local_vlm_summary["status"] == "service_unavailable_fallback":
+        local_vlm_warning = "local visual model unavailable; RapidOCR fallback used"
+    elif local_vlm_summary["status"] == "partial_fallback":
+        local_vlm_warning = (
+            "one or more local visual responses failed the strict contract; "
+            "visual review remains required"
+        )
+
     packet = {
-        "schema_version": 2,
+        "schema_version": 3,
         "created_at": now_iso(),
         "engine": "RapidOCR 3.9.2 / PP-OCRv6"
         + (
@@ -1008,10 +1287,16 @@ def _process_photos_unlocked(
             for key, value in formula_summary.items()
             if key != "formulas"
         },
-        "warnings": [formula_warning] if formula_warning else [],
+        "local_visual_model": local_vlm_summary,
+        "warnings": [
+            warning
+            for warning in (formula_warning, local_vlm_warning)
+            if warning
+        ],
         "model_workflow": [
             "Read ocr_text before opening an image.",
-            "If a local visual model is used, apply only the versioned transcription prompt and validate its JSON before grading.",
+            "Use accepted local_vlm evidence only as visual transcription; never as a verdict or solution.",
+            "Follow review_route: open the preview only when the route still requires model visual review.",
             "Use formula_ocr LaTeX as a locator, not as trusted transcription.",
             "Open model_preview_path to separate printed question from handwriting.",
             "Open only relevant detail_crops when a formula or step is ambiguous.",
@@ -1026,6 +1311,9 @@ def _process_photos_unlocked(
             "ocr_characters": total_characters,
             "detail_crops": total_detail_crops,
             "formula_candidates": formula_count,
+            "local_vlm_attempted_pages": local_vlm_summary["attempted_pages"],
+            "local_vlm_accepted_pages": local_vlm_summary["accepted_pages"],
+            "local_vlm_rejected_pages": local_vlm_summary["rejected_pages"],
             "preview_pixel_ratio": (
                 round(total_preview_pixels / total_original_pixels, 4)
                 if total_original_pixels
@@ -1049,6 +1337,8 @@ def process_photos(
     force: bool = False,
     engine_factory: Callable[[], Any] | None = None,
     formula_ocr: str = "auto",
+    vision_mode: str = "auto",
+    task: str = "grade",
     lock_timeout_seconds: float = OCR_LOCK_TIMEOUT_SECONDS,
     lock_factory: Callable[[Path, float], Any] | None = None,
 ) -> dict[str, Any]:
@@ -1060,7 +1350,11 @@ def process_photos(
     if not paths:
         raise ValueError("at least one photo is required")
     key = _batch_key(paths)
-    ocr_profile = _ocr_profile(formula_ocr, project_root)
+    if vision_mode not in {"auto", "off", "required"}:
+        raise ValueError("vision_mode must be auto, off, or required")
+    if task not in {"grade", "verify"}:
+        raise ValueError("task must be grade or verify")
+    ocr_profile = _ocr_profile(formula_ocr, project_root, vision_mode, task)
     effective_out_dir = (
         out_dir.resolve()
         if out_dir is not None
@@ -1089,6 +1383,8 @@ def process_photos(
             force,
             engine_factory,
             formula_ocr,
+            vision_mode,
+            task,
         )
     result["ocr_serialized"] = True
     result["ocr_lock_scope"] = "machine_wide_shared_across_subjects"
@@ -1114,6 +1410,8 @@ def _compact_result(
                 }
                 for crop in page.get("detail_crops", [])
             ],
+            "review_route": page.get("review_route"),
+            "local_vlm": page.get("local_vlm"),
         }
         for page in pages
     ]
@@ -1137,6 +1435,7 @@ def _compact_result(
         ),
         "formula_ocr_status": packet.get("formula_ocr", {}).get("status"),
         "formula_ocr_device": packet.get("formula_ocr", {}).get("device"),
+        "local_visual_model": packet.get("local_visual_model", {}),
         "preview_pixel_ratio": packet.get("metrics", {}).get("preview_pixel_ratio"),
         "preview_paths": [page.get("model_preview_path") for page in pages],
         "local_vlm_transcription": {

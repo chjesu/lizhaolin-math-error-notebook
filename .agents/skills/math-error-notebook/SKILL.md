@@ -26,6 +26,14 @@ description: Manage a Chinese high-school math error notebook backed by one loca
 python -B <skill-dir>\scripts\notebook.py photo-preflight <image...> --json
 ```
 
+The default `--vision-mode auto --task grade` route runs RapidOCR first and obeys
+the configured local-Qwen auto-inference gate. That gate is currently disabled
+because the 2026-08-11 real-photo benchmark failed the speed/strict-JSON quality
+bar. Read each page's `review_route` and open only the requested preview/crops.
+Use `--vision-mode required` only for an explicit local-Qwen diagnostic; accepted
+output is transcription evidence only. The project never starts or stops the
+local model service itself.
+
 `photo-preflight` defaults to `--formula-ocr auto`: RapidOCR handles orientation,
 printed text, previews, and detail crops; when the isolated project-local Paddle
 runtime is installed, only those small crops receive GPU formula recognition.
@@ -57,6 +65,11 @@ compares printed transcription with RapidOCR and returns either `quality_gate=pa
 or `visual_review_required`. Only the validated compact JSON may enter the
 DeepSeek/Codex grading context; it does not relax visual review for ambiguous
 formulae, handwriting, or diagrams.
+
+For image-backed bank audits, `prepare-audit-batch` defaults to
+`--visual-evidence auto`: text-only questions incur no OCR/VLM work, while image
+questions receive the same cached shared-lock preflight. `off` skips the evidence
+packet and `required` requires the configured local Qwen service.
 
 2. Separate printed content from handwriting; reconstruct steps and identify the first substantive error.
 3. If a key symbol, condition, diagram, or step is unreadable, state it and request a clearer crop. Never fabricate. Use `unclear` for insufficient evidence; use `careless` only with direct evidence.

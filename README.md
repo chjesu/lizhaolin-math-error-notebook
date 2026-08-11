@@ -88,7 +88,7 @@ flowchart LR
 
 ## 核心能力
 
-- **照片批改**：结合 RapidOCR、可选 PaddleOCR 公式候选和视觉复核识别题目及手写步骤。
+- **照片批改**：RapidOCR 先做低成本预检并只输出必要小图；本地 Qwen 有严格转录合同和回退机制，但当前实测未达到速度/结构门槛，默认自动推理关闭；可选 PaddleOCR 只提供公式候选。
 - **步骤级诊断**：定位第一处实质错误，区分知识点未掌握、方法选择错误、计算错误等原因。
 - **可信题库**：记录年级、难度、知识点、来源、许可、结构特征、去重指纹和验证状态。
 - **针对性推荐**：只从已验证题中按知识点、错因、难度和历史表现推荐同类型练习。
@@ -169,8 +169,8 @@ python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py seed
 ### 照片错题
 
 ```powershell
-# OCR 与图片预检
-python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-preflight <照片路径> --json
+# OCR、本地视觉条件分流与图片预检
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-preflight <照片路径> --vision-mode auto --task grade --json
 
 # 生成判题预览；确认后再提交正式记录
 python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py grade-preview <判题输入JSON> --json

@@ -57,19 +57,22 @@ python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py agent-c
 
 ## 5. DeepSeek 无视觉能力时的照片判题流程
 
-项目已经提供两级本地 OCR，OCR 在本机运行，DeepSeek 只读取精简 JSON：
+项目已提供条件分流的本地视觉预检，DeepSeek 只读取精简 JSON：
 
 - RapidOCR：方向校正、印刷题目正文、题库编号、预览和疑难裁剪。
 - PaddleOCR FormulaNet：对疑难小裁剪生成数学公式 LaTeX 候选。
+- 本地 Qwen：只对低置信度、文字过少或疑难页面转录手写与图形；严格禁止判题、求解和给标准答案。
 - 三科错题本共用整机级 OCR 执行槽。Kimi、DeepSeek 或多个 Codex 会话同时调用时应等待 `photo-preflight` 自动排队，不得另起 OCR 脚本或并行加载模型；取得执行槽后脚本会再次检查缓存。可从 `doctor.ocr_runtime.concurrency` 查看实际共享锁。
 
 先运行：
 
 ```powershell
-python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-preflight <图片路径> --formula-ocr auto --json
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-preflight <图片路径> --formula-ocr auto --vision-mode auto --task grade --json
 ```
 
-若本机视觉模型可用，不要让 DeepSeek 直接反复接收整张照片，也不要让本地模型判题。先读取固定契约，将其中的提示词与单页预览/疑难裁剪交给本地模型，再校验返回的纯 JSON：
+`photo-preflight` 会检测用户已启动的 Qwen 服务，但不会自动启停模型。2026-08-11 的真实照片回归中，OCR 特化模型未通过严格 JSON 合同，通用模型超过 180 秒，因此配置默认关闭自动 Qwen 推理；日常 `auto` 继续使用 RapidOCR 与精确小图复核。只有显式诊断才用 `--vision-mode required`。返回中的 `review_route` 决定下一步；坏 JSON、代码围栏、越权字段或哈希错配一律拒绝，不得绕过质量门。
+
+以下命令仅用于诊断合同或单独校验历史响应，日常流程无需人工拼接：
 
 ```powershell
 python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-vlm-contract --json
@@ -96,9 +99,9 @@ python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py questio
 
 ```text
 照片
-  → photo-preflight（本地 RapidOCR + 可选 FormulaNet）
+  → photo-preflight（RapidOCR先行；疑难页条件Qwen；可选FormulaNet）
   → 识别到题库编号时读取 question --compact
-  → DeepSeek 可判定性质量门
+  → 按 review_route / quality_gate 分流
       → 安全题：数学推理 → grade-preview → grade-commit
       → 疑难题：requires_visual_confirmation → 停止保存并请求视觉复核
 ```

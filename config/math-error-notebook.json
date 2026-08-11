@@ -2,5 +2,16 @@
   "project_name": "李兆霖数学错题本",
   "print_recommendations": false,
   "printer_name": "EPSON72097C (L3250 Series)",
-  "answers_after_questions": false
+  "answers_after_questions": false,
+  "local_visual_model": {
+    "enabled": true,
+    "strategy": "rapidocr_first_qwen_required_on_demand_strict_fallback",
+    "auto_inference_enabled": false,
+    "auto_inference_note": "2026-08-11 benchmark: OCR model failed strict JSON contract; general model exceeded 180 seconds",
+    "model_name": "Qwen2.5-VL-7B-Instruct-OCR-4bit",
+    "endpoint": "http://127.0.0.1:7863",
+    "client_python": "C:/Users/Administrator/Documents/Codex/InternVL2-8B/venv/Scripts/python.exe",
+    "request_timeout_seconds": 150,
+    "max_new_tokens": 1536
+  }
 }

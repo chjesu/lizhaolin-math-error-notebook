@@ -223,12 +223,89 @@ class LocalVLMTranscriptionContractTests(unittest.TestCase):
         self.assertEqual(result["quality_gate"], "visual_review_required")
         self.assertIn("uncertain_handwriting", result["visual_review_reasons"])
 
+    def test_clear_described_diagram_does_not_force_duplicate_visual_review(self) -> None:
+        payload = self.valid_payload()
+        payload["question_blocks"][0]["diagram"] = {
+            "present": True,
+            "visible_facts": ["直线 l 与圆相切于点 A"],
+        }
+        result = photo_ocr.validate_local_vlm_response(payload)
+        self.assertEqual(result["quality_gate"], "pass")
+        self.assertFalse(result["requires_visual_confirmation"])
+
     def test_response_file_rejects_markdown_fence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             response = Path(directory) / "response.json"
             response.write_text("```json\n{}\n```", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "JSON only"):
                 photo_ocr.validate_local_vlm_response_file(response)
+
+
+class LocalVLMRoutingTests(unittest.TestCase):
+    def test_clear_verification_page_skips_slow_local_model(self) -> None:
+        page = {
+            "ocr_text": "题干与答案解析均完整。" * 5,
+            "mean_confidence": 0.96,
+            "detail_crops": [{"reason": "math_notation"}],
+        }
+        self.assertEqual(photo_ocr._local_vlm_trigger_reasons(page, "verify"), [])
+
+    def test_low_confidence_grading_page_routes_to_local_model(self) -> None:
+        page = {
+            "ocr_text": "学生作答",
+            "mean_confidence": 0.7,
+            "detail_crops": [{"reason": "low_ocr_confidence"}],
+        }
+        reasons = photo_ocr._local_vlm_trigger_reasons(page, "grade")
+        self.assertIn("low_mean_ocr_confidence", reasons)
+        self.assertIn("little_rapidocr_text", reasons)
+        self.assertIn("low_confidence_regions", reasons)
+
+    def test_auto_mode_falls_back_when_service_is_unavailable(self) -> None:
+        pages = [{"page": 1}]
+        with (
+            patch.object(
+                photo_ocr,
+                "_local_vlm_config",
+                return_value={"enabled": True, "auto_inference_enabled": True},
+            ),
+            patch.object(photo_ocr, "_local_vlm_service_available", return_value=False),
+        ):
+            result = photo_ocr._apply_local_vlm(
+                pages, Path.cwd(), Path.cwd(), "auto", "grade"
+            )
+        self.assertEqual(result["status"], "service_unavailable_fallback")
+        self.assertIn("fallback", pages[0]["review_route"])
+
+    def test_required_mode_rejects_unavailable_service(self) -> None:
+        with (
+            patch.object(photo_ocr, "_local_vlm_config", return_value={"enabled": True}),
+            patch.object(photo_ocr, "_local_vlm_service_available", return_value=False),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "required"):
+                photo_ocr._apply_local_vlm(
+                    [{"page": 1}], Path.cwd(), Path.cwd(), "required", "verify"
+                )
+
+    def test_auto_gate_skips_service_probe_after_failed_benchmark(self) -> None:
+        pages = [{"page": 1}]
+        with (
+            patch.object(
+                photo_ocr,
+                "_local_vlm_config",
+                return_value={"enabled": True, "auto_inference_enabled": False},
+            ),
+            patch.object(
+                photo_ocr,
+                "_local_vlm_service_available",
+                side_effect=AssertionError("disabled auto route must not probe service"),
+            ),
+        ):
+            result = photo_ocr._apply_local_vlm(
+                pages, Path.cwd(), Path.cwd(), "auto", "grade"
+            )
+        self.assertEqual(result["status"], "auto_inference_disabled_after_benchmark")
+        self.assertEqual(pages[0]["review_route"], "rapidocr_then_model_visual_review")
 
 
 if __name__ == "__main__":

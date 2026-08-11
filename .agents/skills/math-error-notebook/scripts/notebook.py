@@ -2954,19 +2954,28 @@ def doctor(
         warnings.append("printer_not_configured")
     try:
         from photo_ocr import (
+            local_vlm_runtime_status,
             ocr_runtime_status,
             paddle_formula_runtime_status,
         )
 
         ocr_runtime = ocr_runtime_status(project_root)
         formula_ocr_runtime = paddle_formula_runtime_status(project_root)
+        local_vlm_runtime = local_vlm_runtime_status(project_root)
     except (ImportError, OSError):
         ocr_runtime = {"available": False}
         formula_ocr_runtime = {"available": False}
+        local_vlm_runtime = {"enabled": False, "service_available": False}
     if not ocr_runtime.get("available"):
         warnings.append("ocr_runtime_not_installed")
     if not formula_ocr_runtime.get("available"):
         warnings.append("paddle_formula_ocr_runtime_not_installed")
+    if (
+        local_vlm_runtime.get("enabled")
+        and local_vlm_runtime.get("auto_inference_enabled")
+        and not local_vlm_runtime.get("service_available")
+    ):
+        warnings.append("local_visual_model_unavailable_using_ocr_fallback")
     return {
         "status": "ok" if all(checks.values()) else "error",
         "checks": checks,
@@ -2984,6 +2993,7 @@ def doctor(
         "pdf_dependencies": pdf_dependencies,
         "ocr_runtime": ocr_runtime,
         "formula_ocr_runtime": formula_ocr_runtime,
+        "local_visual_model": local_vlm_runtime,
         "search_index": search_index_status(conn),
         "text_encoding": encoding_status,
         "printer": config.get("printer_name"),
@@ -3160,6 +3170,7 @@ def prepare_audit_batch(
     reviewer: str,
     force: bool,
     simplified_only: bool = False,
+    visual_evidence: str = "off",
 ) -> dict[str, Any]:
     """Create packets and safe, unsubmitted review skeletons without changing the DB."""
     rows = audit_queue(
@@ -3183,6 +3194,26 @@ def prepare_audit_batch(
         packet["visual_review_images"] = prepare_audit_visual_previews(
             packet, DEFAULT_PROJECT_ROOT, previews_dir
         )
+        review_paths = [
+            Path(str(image["review_path"]))
+            for image in packet["visual_review_images"]
+            if image.get("status") in {"original", "opaque_preview"}
+            and image.get("review_path")
+        ]
+        packet["visual_evidence"] = None
+        if review_paths and visual_evidence != "off":
+            from photo_ocr import ensure_ocr_runtime, process_photos
+
+            ensure_ocr_runtime()
+            packet["visual_evidence"] = process_photos(
+                review_paths,
+                DEFAULT_PROJECT_ROOT,
+                out_dir / "visual-evidence" / safe_id,
+                formula_ocr="auto",
+                vision_mode=visual_evidence,
+                task="verify",
+                force=force,
+            )
         unsigned_packet = dict(packet)
         unsigned_packet.pop("packet_sha256", None)
         canonical = json.dumps(
@@ -3228,11 +3259,13 @@ def prepare_audit_batch(
             "issues": summary["issues"],
             "near_duplicates": summary["near_duplicate_count"],
             "visual_review_images": packet["visual_review_images"],
+            "visual_evidence": packet["visual_evidence"],
         })
     manifest = {
         "schema": "math-audit-work-batch/v1",
         "created_at": now_iso(),
         "source_name": source_name,
+        "visual_evidence_mode": visual_evidence,
         "items": items,
         "skipped_existing_reviews": skipped,
         "next_command": "verify-item <question-id> <review.json> --json",
@@ -3384,6 +3417,18 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("auto", "off", "paddle"),
         default="auto",
         help="optional formula recognition; auto uses the isolated Paddle runtime when available",
+    )
+    p.add_argument(
+        "--vision-mode",
+        choices=("auto", "off", "required"),
+        default="auto",
+        help="auto obeys the benchmark gate; required explicitly runs Qwen and fails if unavailable",
+    )
+    p.add_argument(
+        "--task",
+        choices=("grade", "verify"),
+        default="grade",
+        help="adjust visual-routing thresholds for grading or bank verification",
     )
     p.add_argument("--force", action="store_true")
     p.add_argument("--json", action="store_true")
@@ -3588,6 +3633,12 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"only questions imported on or after {SIMPLIFIED_VERIFICATION_FROM}",
     )
     p.add_argument("--force", action="store_true", help="overwrite existing pending review files")
+    p.add_argument(
+        "--visual-evidence",
+        choices=("auto", "off", "required"),
+        default="auto",
+        help="preflight image-backed questions; auto falls back safely when local Qwen is unavailable",
+    )
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("verify-item", help="apply one structured independent review and optionally verify")
@@ -3698,6 +3749,8 @@ def main(argv: list[str] | None = None) -> int:
                 max(0, min(args.max_detail_crops, 20)),
                 force=args.force,
                 formula_ocr=args.formula_ocr,
+                vision_mode=args.vision_mode,
+                task=args.task,
             )
             print_output(payload, args.json, args.pretty_json)
             return 0
@@ -3844,6 +3897,7 @@ def main(argv: list[str] | None = None) -> int:
                 payload = prepare_audit_batch(
                     conn, args.source_name, max(1, min(args.limit, 100)), args.out_dir,
                     args.reviewer, args.force, args.simplified_only,
+                    args.visual_evidence,
                 )
             elif args.command == "verify-item":
                 payload = apply_verification_review(conn, args.question_id, args.review)

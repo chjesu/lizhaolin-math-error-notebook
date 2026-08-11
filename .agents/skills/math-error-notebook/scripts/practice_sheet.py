@@ -219,7 +219,7 @@ def _cause_name(cause_code: str | None) -> str:
 
 
 MATH_CACHE_DIR = PROJECT_ROOT / "tmp" / "pdfs" / "math"
-MATH_CACHE_VERSION = "v2"
+MATH_CACHE_VERSION = "v3"
 _MATH_REGISTRY: dict[str, tuple[str, bool]] = {}
 _MATH_COUNTER = itertools.count()
 _HAS_CJK = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿＀-￯]")
@@ -289,6 +289,42 @@ def _extract_math(text: str) -> str:
         latex = text[i + len(opener):k]
         out.append(_register_math(latex, display) if latex.strip() else "")
         i = k + len(closer)
+    value = "".join(out)
+
+    # Historical error stems sometimes contain complete LaTeX fractions without
+    # surrounding math delimiters, for example ``\frac{17}{16}`` or
+    # ``\frac{\sqrt6}{2}``.  Keep the whole two-argument command together so it
+    # reaches mathtext instead of degrading to plain ``(17)/(16)`` text.  This
+    # intentionally targets only explicit TeX fraction commands; prose slashes
+    # and dates remain untouched.
+    out = []
+    i = 0
+    while i < len(value):
+        if value[i] != "\\":
+            out.append(value[i])
+            i += 1
+            continue
+        command = next(
+            (name for name in _FRAC_STYLE_COMMANDS if value.startswith(name, i)),
+            None,
+        )
+        if command is None:
+            out.append(value[i])
+            i += 1
+            continue
+        after = i + len(command)
+        if after < len(value) and value[after].isalpha():
+            out.append(value[i])
+            i += 1
+            continue
+        first = _read_math_token(value, after)
+        second = _read_math_token(value, first[1]) if first else None
+        if not first or not second:
+            out.append(value[i])
+            i += 1
+            continue
+        out.append(_register_math(command + first[0] + second[0]))
+        i = second[1]
     value = "".join(out)
 
     token = "\\sqrt{"
@@ -404,7 +440,10 @@ def _normalize_math_args(latex: str) -> str:
             if token is None:
                 ok = False
                 break
-            args.append(token[0])
+            argument = token[0]
+            if argument.startswith("{") and argument.endswith("}"):
+                argument = "{" + _normalize_math_args(argument[1:-1]) + "}"
+            args.append(argument)
             j = token[1]
         if not ok:
             out.append(latex[i])
@@ -413,6 +452,98 @@ def _normalize_math_args(latex: str) -> str:
         out.append(command + "".join(args))
         i = j
     return "".join(out)
+
+
+_SLASH_FRACTION_BOUNDARIES = frozenset("+-=<>:,;|&")
+
+
+def _slash_operand_span(latex: str, slash: int, *, reverse: bool) -> tuple[int, int] | None:
+    """Return the adjacent balanced operand on one side of a slash."""
+    if reverse:
+        index = slash - 1
+        while index >= 0 and latex[index] in " \t":
+            index -= 1
+        end = index + 1
+        depths = {"}": 0, ")": 0, "]": 0}
+        opening_to_closing = {"{": "}", "(": ")", "[": "]"}
+        while index >= 0:
+            char = latex[index]
+            if char in depths:
+                depths[char] += 1
+            elif char in opening_to_closing:
+                closing = opening_to_closing[char]
+                if depths[closing] == 0:
+                    break
+                depths[closing] -= 1
+            elif not any(depths.values()) and (
+                char.isspace() or char == "/" or char in _SLASH_FRACTION_BOUNDARIES
+            ):
+                break
+            index -= 1
+        start = index + 1
+        return (start, end) if start < end else None
+
+    index = slash + 1
+    while index < len(latex) and latex[index] in " \t":
+        index += 1
+    start = index
+    depths = {"{": 0, "(": 0, "[": 0}
+    closing_to_opening = {"}": "{", ")": "(", "]": "["}
+    while index < len(latex):
+        char = latex[index]
+        if char in depths:
+            depths[char] += 1
+        elif char in closing_to_opening:
+            opening = closing_to_opening[char]
+            if depths[opening] == 0:
+                break
+            depths[opening] -= 1
+        elif not any(depths.values()) and (
+            char.isspace() or char == "/" or char in _SLASH_FRACTION_BOUNDARIES
+        ):
+            break
+        index += 1
+    return (start, index) if start < index else None
+
+
+def _normalize_slash_fractions(latex: str) -> str:
+    r"""Convert conservative inline ``a/b`` forms to stacked ``\frac`` forms.
+
+    Imported PDF text often preserves a mathematical fraction only as a slash,
+    for example ``x^2/a^2`` or ``\sqrt{3}a/12``.  Conversion happens only in
+    already-extracted math segments and stops at top-level operators, spaces and
+    punctuation. Text-bearing commands are protected so units such as
+    ``\mathrm{m/s}`` keep their literal slash.
+    """
+    protected: list[str] = []
+
+    def _protect(match: "re.Match[str]") -> str:
+        token = f"ZZPROTECTEDFRACTION{len(protected):04d}ZZ"
+        protected.append(match.group(0))
+        return token
+
+    value = _PROTECTED_TEXT_COMMAND.sub(_protect, latex)
+    search_from = 0
+    while True:
+        slash = value.find("/", search_from)
+        if slash < 0:
+            break
+        left = _slash_operand_span(value, slash, reverse=True)
+        right = _slash_operand_span(value, slash, reverse=False)
+        if left is None or right is None:
+            search_from = slash + 1
+            continue
+        start, left_end = left
+        right_start, end = right
+        numerator = value[start:left_end]
+        denominator = value[right_start:end]
+        replacement = rf"\frac{{{numerator}}}{{{denominator}}}"
+        value = value[:start] + replacement + value[end:]
+        search_from = start + len(replacement)
+
+    for index, original in enumerate(protected):
+        value = value.replace(f"ZZPROTECTEDFRACTION{index:04d}ZZ", original)
+    return value
 
 
 def _normalize_line_symbol(latex: str) -> str:
@@ -438,7 +569,9 @@ def _normalize_line_symbol(latex: str) -> str:
 
 def _normalize_render_latex(latex: str) -> str:
     """Return the canonical LaTeX string consumed by the PDF renderer."""
-    return _normalize_line_symbol(_normalize_math_args(latex))
+    value = _normalize_math_args(latex)
+    value = _normalize_slash_fractions(value)
+    return _normalize_line_symbol(value)
 
 
 def _render_math_image(latex: str, font_size: float) -> tuple[str, float, float]:

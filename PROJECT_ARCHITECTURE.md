@@ -11,7 +11,7 @@
 - 错题记录：`25`；到期复习阶段：`110`
 - 主执行器：`.agents/skills/math-error-notebook/scripts/notebook.py`
 - 组卷与打印：`.agents/skills/math-error-notebook/scripts/practice_sheet.py`
-- 照片 OCR 预检：`notebook.py photo-preflight`（RapidOCR 主流程位于 `photo_ocr.py`；隔离的 PaddleGPU 公式识别位于 `paddle_formula_worker.py`；本地视觉模型只按版本化固定提示词转录，结果经 `photo-vlm-validate` 校验后才进入判题上下文）
+- 照片 OCR 预检：`notebook.py photo-preflight`（RapidOCR 先做低成本预检；本地 Qwen 保留严格合同与条件路由，但 2026-08-11 实测未达速度/结构门槛，默认自动推理关闭；隔离的 PaddleGPU 仅给公式候选）
 - 默认打印机：`EPSON72097C (L3250 Series)`
 
 数量是 2026-08-08 的实施前快照；实际状态以 `bank-info --json` 为准。
@@ -152,7 +152,7 @@ flowchart TD
 | 智能体交接 | `handoff` | 精简输出主库哈希、验证数量、主要问题、复习任务和 Git 状态 |
 | 行为标准 | `behavior-cases` | 按任务列出跨模型标准案例；只在需要时加载单个完整案例 |
 | 可恢复流程 | `workflow-start` / `workflow-update` / `workflow-status` | 在 `data/workflows/` 保存步骤、产物和断点，不重复已完成阶段 |
-| 照片预检 | `photo-preflight` | RapidOCR 离线方向纠正、文本、缓存、小预览及疑难裁剪；精简返回直接包含 OCR 正文、题号和裁剪选择器，例行判题不得再读取完整 OCR 包；`--formula-ocr auto|off|paddle` 可让隔离的 PaddleGPU 仅处理小裁剪。公式候选不可信任，不写主库，不替代视觉和数学判断 |
+| 照片预检 | `photo-preflight` | RapidOCR 离线方向纠正、文本、缓存、小预览及疑难裁剪；`--vision-mode auto` 遵循配置中的自动推理开关（当前基准未通过，故不加载 Qwen），`off` 禁用，`required` 用于显式 Qwen 诊断且服务不可用即失败；`--task grade|verify` 使用不同阈值。精简返回 `review_route`，只打开必要小图。`--formula-ocr auto|off|paddle` 的公式候选仍不可信任 |
 | 本地视觉转录契约 | `photo-vlm-contract` | 返回固定提示词的位置、版本、必填字段和禁止字段；本地模型只转录可见证据，不得判题或给答案 |
 | 本地视觉转录质量门 | `photo-vlm-validate` | 将本地模型 JSON 与 `ocr-packet.json` 页面的图片哈希及 RapidOCR 文本绑定；拒绝越权字段、错误版本、非 JSON 包装和图片错配，输出精简证据或升级视觉复核 |
 | 初始化 | `init` | 创建 schema、装载知识点；主库存在时不得用来重建数据 |
@@ -185,7 +185,7 @@ flowchart TD
 | 单题标注 | `annotate` | 修正题干/答案/解析/标签/难度/题型；内部验证质量门 |
 | 审核队列 | `audit-queue` | 精简列出未验证题，可按来源过滤；`--simplified-only` 只列自 2026-07-20 起入库的简化验证题 |
 | 审核包 | `audit-item` | 汇总一题的内容、来源、问题、近重复项、审核要求和 `verification_mode` |
-| 审核脚手架 | `prepare-audit-batch` | 生成逐题审核包和 verdict=pending 的审核 JSON，不修改数据库；支持 `--simplified-only`；原始题图保持不变，透明 PNG 仅在审核工作目录生成白底预览，并通过 `visual_review_images.review_path` 提供给视觉审核 |
+| 审核脚手架 | `prepare-audit-batch` | 生成逐题审核包和 verdict=pending 的审核 JSON，不修改数据库；支持 `--simplified-only`；`--visual-evidence auto` 只对含图题运行共享 OCR/条件 Qwen，文本题零视觉开销；透明 PNG 仅在审核工作目录生成白底预览。可用 `off|required` 明确禁用或强制本地视觉服务 |
 | 精简审核扩展 | `prepare-review-batch` | 将模型逐题给出的精简决策扩展为完整审核 JSON，不替代数学判断、不写库 |
 | 结构化验证 | `verify-item` | 接受独立审核 JSON；逐题记录并在通过时提升状态 |
 | 批量提交审核 | `verify-review-batch` | 逐项复用 `verify-item` 质量门提交审核文件，只压缩命令输出，不批量放宽验证 |
@@ -215,7 +215,7 @@ flowchart TD
 - 公式增强固定在 `.runtime/paddleocr`，模型与缓存固定在 `.runtime/paddle-home`，依赖由 `requirements-paddleocr.txt` 锁定；不得安装到系统 Python 或新建另一套照片入口。
 - `auto` 模式在 Paddle 不可用或运行失败时保留 RapidOCR 结果并写入警告；`paddle` 模式用于诊断，公式阶段失败即报错。
 - `ocr-packet.json` 缓存记录 OCR profile；运行时能力变化会自动重建旧缓存。缓存公式必须保留裁剪路径、坐标及 `requires_visual_confirmation=true`。
-- 固定视觉转录提示词位于 `.agents/skills/math-error-notebook/assets/local-vlm-transcription-prompt.txt`。本地视觉模型只接收单页预览或疑难裁剪，并返回 `math-photo-evidence-v1` JSON；不得把自由文本或模型判定直接拼入 DeepSeek/Codex 上下文。`photo-vlm-validate` 负责结构、禁止字段、来源 SHA256 和 RapidOCR 一致性质量门。
+- 固定视觉转录提示词位于 `.agents/skills/math-error-notebook/assets/local-vlm-transcription-prompt.txt`。项目只连接用户已启动的本地 Qwen 服务，不在业务命令中自动启停或并行加载模型。Qwen 只转录可见证据并返回 `math-photo-evidence-v1` JSON；代码围栏、坏 JSON、越权字段、来源 SHA256 错配或识别冲突一律拒绝并回退到 RapidOCR + 模型视觉复核。`doctor.local_visual_model` 报告服务状态。
 - `doctor --json` 同时报告 `ocr_runtime` 与 `formula_ocr_runtime`，含模型是否已缓存。
 - 三科错题本共用一个整机级跨进程 OCR 执行锁，默认位于 `%TEMP%/LiZhaolinErrorNotebooks/locks/photo-ocr.lock`；系统临时目录是 Codex 沙箱允许三科共同写入的位置，也可用绝对路径环境变量 `LIZHAOLIN_OCR_SHARED_LOCK` 覆盖。锁覆盖 RapidOCR、裁剪生成和 Paddle 公式识别，避免不同项目或不同会话同时加载模型。等待前与取得锁后各检查一次本项目缓存，输出包使用原子替换写入；`doctor.ocr_runtime.concurrency` 报告实际锁路径、范围、超时和线程上限。
 - CLI：`print_output`、`build_parser`、`main`
@@ -390,7 +390,7 @@ PowerShell 读取项目文本必须显式使用 `Get-Content -Encoding UTF8`，P
 
 固定流程：
 
-- 判题：`photo-preflight（直接使用精简 ocr_pages/question_ids） → question --compact（题号可见时） → 模型按需查看小图 → grade-preview → grade-commit`；不得在常规流程中整包读取 `ocr-packet.json`
+- 判题：`photo-preflight --vision-mode auto --task grade（读取精简 ocr_pages/review_route） → question --compact（题号可见时） → 仅按 review_route 查看小图 → grade-preview → grade-commit`；不得在常规流程中整包读取 `ocr-packet.json`
 - 推荐：`recommend-packet --limit 3 → 模型只复核精简题干 → assign-recommendations <同一packet>`；仅对个别疑难候选调用 `question <id>`，不再默认加载全部答案与长解析
 - 每日复习：`daily-review-packet → 补齐缺少的已复核推荐 → practice_sheet.py --daily-packet`；积压阶段不再重复变成多份任务
 - 批量 DOCX：`import_recent_docx_batch.py → audit_recent_docx_batch.py`

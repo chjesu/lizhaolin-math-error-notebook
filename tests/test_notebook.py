@@ -1051,6 +1051,19 @@ class NotebookTests(unittest.TestCase):
             [("x+1", False), (r"\frac{1}{2}", True), ("y^2", True)],
         )
 
+    def test_practice_sheet_extracts_bare_latex_fractions(self):
+        rendered = practice_sheet.clean_math(
+            r"A. \frac{\sqrt6}{2}；B. \frac{17}{16}；日期 2025/2026"
+        )
+        tokens = re.findall(r"ZZMATH\d+ZZ", rendered)
+        self.assertEqual(len(tokens), 2)
+        self.assertEqual(
+            [practice_sheet._MATH_REGISTRY[token] for token in tokens],
+            [(r"\frac{\sqrt6}{2}", False), (r"\frac{17}{16}", False)],
+        )
+        self.assertIn("日期 2025/2026", rendered)
+        self.assertNotIn("(17)/(16)", rendered)
+
     def test_practice_sheet_truncation_keeps_math_token_atomic(self):
         tokenized = practice_sheet.clean_math(r"前文 $\frac{1}{2}$ 后文")
         token = re.search(r"ZZMATH\d+ZZ", tokenized).group(0)
@@ -1076,6 +1089,7 @@ class NotebookTests(unittest.TestCase):
         cases = {
             r"\frac12": r"\frac{1}{2}",
             r"\frac{\sqrt{10}}5": r"\frac{\sqrt{10}}{5}",
+            r"\frac{\sqrt6}{2}": r"\frac{\sqrt{6}}{2}",
             r"\dfrac\pi2": r"\dfrac{\pi}{2}",
             r"S=\frac12 ABd": r"S=\frac{1}{2} ABd",
             r"\sqrt3\sin x": r"\sqrt{3}\sin x",
@@ -1085,6 +1099,23 @@ class NotebookTests(unittest.TestCase):
         }
         for source, expected in cases.items():
             self.assertEqual(practice_sheet._normalize_math_args(source), expected)
+
+    def test_practice_sheet_normalizes_slash_fractions(self):
+        cases = {
+            r"x^2/a^2+y^2/b^2=1": r"\frac{x^2}{a^2}+\frac{y^2}{b^2}=1",
+            r"\sqrt3a/12": r"\frac{\sqrt{3}a}{12}",
+            r"(0,\sqrt3/2]": r"(0,\frac{\sqrt{3}}{2}]",
+            r"x^2/5+y^2=1": r"\frac{x^2}{5}+y^2=1",
+            r"(a+b)/c": r"\frac{(a+b)}{c}",
+            r"x/(a+b)": r"\frac{x}{(a+b)}",
+            r"\frac{1}{2}": r"\frac{1}{2}",
+            r"\mathrm{m/s}": r"\mathrm{m/s}",
+        }
+        for source, expected in cases.items():
+            self.assertEqual(practice_sheet._normalize_render_latex(source), expected)
+
+        # Slash normalization is confined to extracted math, never prose/date text.
+        self.assertEqual(practice_sheet.clean_math("日期 2025/2026"), "日期 2025/2026")
 
     def test_practice_sheet_normalizes_line_symbol_to_ell(self):
         cases = {

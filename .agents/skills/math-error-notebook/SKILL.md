@@ -117,6 +117,14 @@ python -B <skill-dir>\scripts\notebook.py assign-recommendations <error-id> <pac
 python -B <skill-dir>\scripts\practice_sheet.py <error-id> --print
 ```
 
+For a formal exam assembled from reviewed verified-bank items, save one
+`math-exam-packet/v1` JSON file under `practice/` with section titles, positive
+per-question scores, a matching total score, and verified `question_id` values,
+then use `practice_sheet.py --exam-packet <packet.json>`. The loader rejects
+missing, duplicate, unverified, or score-inconsistent items. `display_stem` is
+allowed only for layout-preserving notation fixes that do not change meaning.
+Exam PDFs also default to no answers and no print.
+
 Printer/output preferences live in `config/math-error-notebook.json`. The script emits only a compact artifact summary.
 
 After grading practice, record it with `attempt <question-id> --error-id <error-id> --correct|--wrong`; include `--cause-code` when wrong, then adapt recommendations.
@@ -129,7 +137,7 @@ Read `references/import-and-verification.md` only for question import, source re
 
 ## Review and progress
 
-Use `daily-review-packet --limit 12 --out <packet.json> --json` to collapse accumulated schedules into one task per active error. Stages 1-2 include the original plus two same-level reviewed recommendations, stages 3-4 include the original plus one reviewed variation, and stages 5-6 include the original plus one reviewed recommendation with a preference for slightly higher difficulty. Only saved, reviewed, verified recommendations enter its printable section; resolve any reported recommendation gaps before PDF generation. Generate one questions-only review PDF with `practice_sheet.py --daily-packet <packet.json>`. Use `due --json`, `review <error-id> --result correct|partial|wrong`, `stats --json`, and `coverage --json`. Wrong/partial review starts an adaptive cycle. If the latest review itself was misgraded, use `correct-review <error-id> --result correct|partial|wrong`; it corrects that row and repairs the schedule instead of advancing a second stage.
+Use `daily-review-packet --limit 12 --out <packet.json> --json` to collapse accumulated schedules into one task per active error. Stages 1-2 include the original plus two same-level reviewed recommendations, stages 3-4 include the original plus one reviewed variation, and stages 5-6 include the original plus one reviewed recommendation with a preference for slightly higher difficulty. Only saved, reviewed, verified recommendations enter its printable section; resolve any reported recommendation gaps before PDF generation. Generate one questions-only review PDF with `practice_sheet.py --daily-packet <packet.json>`. Its layout is fixed: main numbers count error groups, each group starts with `错题编号` and `错题回顾`, and its nested exercises are labeled `同类型推荐题 1/2` with `题库编号`, difficulty, recommendation reason, and source in stable positions. A second recommendation never consumes another main number; the next main number begins only at the next error group. Do not replace this hierarchy with flat per-question numbering. Use `due --json`, `review <error-id> --result correct|partial|wrong`, `stats --json`, and `coverage --json`. Wrong/partial review starts an adaptive cycle. If the latest review itself was misgraded, use `correct-review <error-id> --result correct|partial|wrong`; it corrects that row and repairs the schedule instead of advancing a second stage. When the user explicitly confirms an error is mastered, use `master-error <error-id> --json` to retain completed review history while cancelling only its pending stages.
 
 ## Local full-text retrieval
 

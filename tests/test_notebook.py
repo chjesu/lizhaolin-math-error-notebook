@@ -451,6 +451,24 @@ class NotebookTests(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(cycle, 2)
 
+    def test_mark_error_mastered_keeps_completed_history_and_cancels_pending_stages(self):
+        error_id = self.create_error()
+        notebook.mark_review(self.conn, error_id, "correct", None, date.today())
+
+        result = notebook.mark_error_mastered(self.conn, error_id)
+
+        self.assertEqual(result["status"], "mastered")
+        self.assertEqual(result["cancelled_pending_stages"], len(notebook.REVIEW_INTERVALS) - 1)
+        self.assertEqual(
+            self.conn.execute("SELECT status FROM errors WHERE id=?", (error_id,)).fetchone()[0],
+            "mastered",
+        )
+        rows = self.conn.execute(
+            "SELECT completed_at FROM review_schedule WHERE error_id=?", (error_id,)
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertIsNotNone(rows[0]["completed_at"])
+
     def test_correct_review_restores_original_schedule_without_duplication(self):
         error_id = self.create_error()
         base = date(2026, 8, 8)
@@ -1213,6 +1231,58 @@ class NotebookTests(unittest.TestCase):
         self.assertIn("错题原题", a_text)
         self.assertIn("答案与解析", a_text)
 
+    def test_exam_packet_loads_verified_questions_and_renders_without_answers(self):
+        from pypdf import PdfReader
+
+        question_id = self.conn.execute(
+            "SELECT id FROM questions WHERE verified=1 ORDER BY id LIMIT 1"
+        ).fetchone()[0]
+        packet = self.root / "exam-packet.json"
+        packet.write_text(json.dumps({
+            "schema": "math-exam-packet/v1",
+            "exam_id": "test-midterm",
+            "title": "高二上学期数学期中考试卷",
+            "duration_minutes": 120,
+            "total_score": 10,
+            "knowledge": ["空间向量与立体几何"],
+            "show_provenance": False,
+            "sections": [{
+                "title": "一、测试题",
+                "instruction": "写出必要步骤。",
+                "questions": [{
+                    "question_id": question_id,
+                    "score": 10,
+                    "reason": "已验证期中范围题",
+                    "answer_space_mm": 5,
+                }],
+            }],
+        }, ensure_ascii=False), encoding="utf-8")
+
+        meta, items, knowledge, exam_id = practice_sheet.load_exam_packet(
+            self.db, packet
+        )
+        self.assertEqual(exam_id, "test-midterm")
+        self.assertEqual(meta["total_score"], 10)
+        self.assertEqual(items[0]["question_id"], question_id)
+        self.assertEqual(knowledge, ["空间向量与立体几何"])
+
+        output = self.root / "exam.pdf"
+        practice_sheet.create_pdf(
+            output,
+            exam_id,
+            {"problem_text": "", "cause_code": None},
+            items,
+            1200,
+            knowledge_names=knowledge,
+            exam_meta=meta,
+        )
+        text = "\n".join(
+            page.extract_text() for page in PdfReader(str(output)).pages
+        )
+        self.assertIn("高二上学期数学期中考试卷", text)
+        self.assertIn("满分：10 分", text)
+        self.assertNotIn("答案与解析", text)
+
     def test_practice_sheet_split_stem_images(self):
         cleaned, paths = practice_sheet.split_stem_images(
             r"如图1 ![原题图](data/imports/x/media/image1.png) 所示，![图](a b.png) 完"
@@ -1505,9 +1575,28 @@ class NotebookTests(unittest.TestCase):
         self.assertEqual(result["printable_questions"], 2)
         error, items, _, _ = practice_sheet.load_daily_packet(self.db, out)
         self.assertEqual(len(items), 2)
-        self.assertIn("错题回顾", items[0]["stem"])
-        self.assertNotIn("错题回顾", items[1]["stem"])
-        self.assertIn("今日到期复习", error["problem_text"])
+        self.assertEqual([item["rank"] for item in items], [1, 1])
+        self.assertEqual(
+            [item["daily_recommendation_index"] for item in items], [1, 2]
+        )
+        self.assertTrue(items[0]["daily_group_start"])
+        self.assertFalse(items[1]["daily_group_start"])
+        self.assertEqual(items[0]["daily_problem_text"], items[1]["daily_problem_text"])
+        self.assertTrue(all("错题回顾" not in item["stem"] for item in items))
+        self.assertTrue(all("同类练习" not in item["stem"] for item in items))
+        self.assertEqual(
+            practice_sheet.daily_group_heading(items[0]),
+            f"1　错题编号 {error_id}",
+        )
+        self.assertEqual(
+            practice_sheet.daily_recommendation_heading(items[1]),
+            f"同类型推荐题 2　题库编号 {items[1]['question_id']}"
+            f"（难度 {items[1]['difficulty']}/5）",
+        )
+        self.assertNotRegex(
+            practice_sheet.daily_recommendation_heading(items[1]), r"^\d+"
+        )
+        self.assertIn("共 1 组，含 2 道练习", error["problem_text"])
 
     def test_daily_review_packet_keeps_original_when_recommendations_are_missing(self):
         error_id = self.create_error()
@@ -1521,6 +1610,10 @@ class NotebookTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["question_id"], error_id)
         self.assertIn("错题回顾", items[0]["stem"])
+        self.assertEqual(items[0]["rank"], 1)
+        self.assertEqual(items[0]["daily_recommendation_index"], 0)
+        self.assertEqual(practice_sheet.identifier_label(error_id), "错题编号")
+        self.assertEqual(practice_sheet.identifier_label("Q-example"), "题库编号")
 
     def test_recoverable_workflow_enforces_order_and_is_idempotent(self):
         started = notebook.workflow_start(self.root, "grade", "photo batch")

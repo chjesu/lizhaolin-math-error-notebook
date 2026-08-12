@@ -172,6 +172,7 @@ flowchart TD
 | 复习到期 | `due` | 查询到期或逾期复习任务 |
 | 每日复习包 | `daily-review-packet` | 每个活动错题合并为一个任务；阶段1–2带2道同难度推荐，阶段3–4带1道变式，阶段5–6带1道优先略难迁移题；只使用已复核且已验证题 |
 | 复习反馈 | `review` | 记录 correct/partial/wrong，并在失败时启动新周期 |
+| 掌握确认 | `master-error` | 用户明确确认已掌握时，保留已完成复习历史并取消尚未发生的后续阶段 |
 | 复习更正 | `correct-review` | 原位更正最近一次误判，并恢复或重建对应复习周期；不重复推进阶段 |
 | 作答记录 | `attempt` | 保存推荐题对错、答案和新的错因 |
 | 作答更正 | `correct-attempt` | 原位更正误判的 attempt，并同步推荐状态；不重复计数 |
@@ -227,9 +228,10 @@ flowchart TD
 ```powershell
 python -B .agents\skills\math-error-notebook\scripts\practice_sheet.py <error-id>
 python -B .agents\skills\math-error-notebook\scripts\practice_sheet.py --daily-packet <packet.json>
+python -B .agents\skills\math-error-notebook\scripts\practice_sheet.py --exam-packet <packet.json>
 ```
 
-已有能力：读取错题及已保存推荐、默认生成无答案练习卷、按需增加答案页、中文字体处理、A4 分页、解析压缩、输出 PDF，并在用户明确要求时通过 LibreOffice/系统打印接口发送到配置的打印机。数学公式支持 `$...$`、`$$...$$`、`\\(...\\)` 与 `\\[...\\]`，通过项目级 `requirements-pdf.txt` 固定依赖并安装到忽略版本控制的 `runtime/pdf`；独立数学变量 `l` 在渲染前统一规范为清晰的 `\\ell`，避免与斜杠混淆；题图会自动裁除近白边、按 DPI 计算物理尺寸、限制在 110×65 mm 内且不放大小图。
+已有能力：读取错题及已保存推荐、每日复习包，或由已验证题号组成的 `math-exam-packet/v1` 正式试卷包；默认生成无答案 A4 练习卷/考试卷，按需增加答案页，并在用户明确要求时通过 LibreOffice/系统打印接口发送到配置的打印机。每日复习 PDF 使用固定分组排版：主序号按错题递增，每组先显示错题编号与错题回顾，组内推荐固定显示为“同类型推荐题 1/2”并附题库编号、难度、推荐理由和来源；推荐题不另占主序号。正式试卷包校验分区、题号去重、逐题正分、总分一致和 `verified=1`，支持仅用于等义排版修正的 `display_stem`。数学公式支持 `$...$`、`$$...$$`、`\\(...\\)` 与 `\\[...\\]`，通过项目级 `requirements-pdf.txt` 固定依赖并安装到忽略版本控制的 `runtime/pdf`；独立数学变量 `l` 在渲染前统一规范为清晰的 `\\ell`，避免与斜杠混淆；题图会自动裁除近白边、按 DPI 计算物理尺寸、限制在 110×65 mm 内且不放大小图。
 
 内部函数：`bundled_python`、`missing_pdf_modules`、`ensure_pdf_runtime`、`load_config`、`load_items`、`clean_math`、`_normalize_line_symbol`、`_normalize_render_latex`、`truncate_clean_text`、`prepare_diagram_image`、`paragraph_text`、`find_soffice`、`print_pdf`、`create_pdf`、`parse_args`、`main`。
 
@@ -365,7 +367,7 @@ math-error-notebook/
 | 保存错题 | `record-error` | 第二套错题 JSON/数据库 |
 | 检索题目 | `search`、`question` | 全库扫描脚本 |
 | 推荐同类题 | `recommend`、`assign-recommendations` | 新推荐器或直接 SQL |
-| 输出/打印练习 | `practice_sheet.py` | 新通用 PDF 生成器 |
+| 输出/打印练习或正式试卷 | `practice_sheet.py`（正式试卷用 `--exam-packet`） | 新通用 PDF 生成器 |
 | 导入 JSON/CSV | `import-file` | 新数据库导入器 |
 | 导入 DOCX | `extract_docx_omml.py` + `build_omml_exam_import.py` + 入库前质量门 + `import-file`；日期批次用 `scripts/import_recent_docx_batch.py` 编排 | 第三套 OMML 转换器，或绕过 `blocked_quality_gate` |
 | 审核未验证题 | `prepare-audit-batch` + `verify-item`；已完成人工审核的清单可用 `verify-review-batch` | 批量 verified 更新脚本 |

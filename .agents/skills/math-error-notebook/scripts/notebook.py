@@ -1676,6 +1676,29 @@ def mark_review(conn: sqlite3.Connection, error_id: str, result: str, note: str 
     return {"error_id": error_id, "result": result, "next_due": pending[0] if pending else None}
 
 
+def mark_error_mastered(conn: sqlite3.Connection, error_id: str) -> dict[str, Any]:
+    error = conn.execute("SELECT status FROM errors WHERE id=?", (error_id,)).fetchone()
+    if not error:
+        raise ValueError(f"error not found: {error_id}")
+    pending = conn.execute(
+        "SELECT COUNT(*) FROM review_schedule WHERE error_id=? AND completed_at IS NULL",
+        (error_id,),
+    ).fetchone()[0]
+    conn.execute(
+        "DELETE FROM review_schedule WHERE error_id=? AND completed_at IS NULL",
+        (error_id,),
+    )
+    conn.execute("UPDATE errors SET status='mastered' WHERE id=?", (error_id,))
+    conn.commit()
+    return {
+        "error_id": error_id,
+        "previous_status": error["status"],
+        "status": "mastered",
+        "cancelled_pending_stages": pending,
+        "database_modified": bool(pending or error["status"] != "mastered"),
+    }
+
+
 def correct_review(
     conn: sqlite3.Connection,
     error_id: str,
@@ -3113,13 +3136,15 @@ AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
         "commands": [
             "daily-review-packet --limit 12 --out <packet.json> --json",
             "due --json", "attempt <question-id> --error-id <error-id> --correct|--wrong --json",
-            "review <error-id> --result correct|partial|wrong --json", "stats --json",
+            "review <error-id> --result correct|partial|wrong --json",
+            "master-error <error-id> --json", "stats --json",
         ],
     },
     "pdf": {
         "commands": [
             "practice_sheet.py <error-id>",
             "practice_sheet.py --daily-packet <packet.json>",
+            "practice_sheet.py --exam-packet <packet.json>",
             "practice_sheet.py <error-id> --with-answers",
             "practice_sheet.py <error-id> --print  # only after explicit user request",
         ],
@@ -3545,6 +3570,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--date")
     p.add_argument("--json", action="store_true")
 
+    p = sub.add_parser("master-error", help="mark an error mastered and cancel pending review stages")
+    p.add_argument("error_id")
+    p.add_argument("--json", action="store_true")
+
     p = sub.add_parser("correct-review", help="correct the latest review result without duplication")
     p.add_argument("error_id")
     p.add_argument("--result", choices=("correct", "partial", "wrong"), required=True)
@@ -3881,6 +3910,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
             elif args.command == "review":
                 payload = mark_review(conn, args.error_id, args.result, args.note, parse_date(args.date))
+            elif args.command == "master-error":
+                payload = mark_error_mastered(conn, args.error_id)
             elif args.command == "correct-review":
                 payload = correct_review(
                     conn, args.error_id, args.result, args.note, parse_date(args.date)

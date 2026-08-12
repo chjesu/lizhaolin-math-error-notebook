@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create and optionally print an A4 practice PDF from saved recommendations."""
+"""Create and optionally print A4 practice sheets or verified-question exams."""
 
 from __future__ import annotations
 
@@ -142,7 +142,7 @@ def load_daily_packet(
     rows: list[dict[str, Any]] = []
     knowledge: list[str] = []
     error_summaries: list[str] = []
-    for item in packet.get("items") or []:
+    for group_rank, item in enumerate(packet.get("items") or [], start=1):
         questions = item.get("questions")
         if questions is None:
             questions = [item.get("question") or {}]
@@ -159,28 +159,24 @@ def load_daily_packet(
             ).fetchone()
             if not row or not row["verified"]:
                 continue
-            rank = len(rows) + 1
             included_for_error += 1
             if included_for_error == 1:
-                error_summaries.append(f"{rank}. {item['problem_text']}")
+                error_summaries.append(f"{group_rank}. {item['problem_text']}")
             for name in item.get("knowledge") or []:
                 if name not in knowledge:
                     knowledge.append(name)
-            prefix = (
-                f"错题回顾：{item['problem_text']}\n\n"
-                if included_for_error == 1
-                else ""
-            )
             record = dict(row)
             record.update({
-                "rank": rank,
+                "rank": group_rank,
                 "reason": question.get("reason") or f"到期复习：{item['error_id']}",
-                "stem": f"{prefix}同类练习 {included_for_error}：{row['stem']}",
+                "daily_group_start": included_for_error == 1,
+                "daily_error_id": item["error_id"],
+                "daily_problem_text": item["problem_text"],
+                "daily_recommendation_index": included_for_error,
             })
             rows.append(record)
         if included_for_error == 0:
-            rank = len(rows) + 1
-            error_summaries.append(f"{rank}. {item['problem_text']}")
+            error_summaries.append(f"{group_rank}. {item['problem_text']}")
             for name in item.get("knowledge") or []:
                 if name not in knowledge:
                     knowledge.append(name)
@@ -192,17 +188,101 @@ def load_daily_packet(
                 "solution": "",
                 "difficulty": item.get("difficulty") or 0,
                 "source_name": "李兆霖数学错题本",
-                "rank": rank,
+                "rank": group_rank,
                 "reason": "本阶段暂无已复核推荐题，仅复习错题原题。",
+                "daily_group_start": True,
+                "daily_error_id": item["error_id"],
+                "daily_problem_text": item["problem_text"],
+                "daily_recommendation_index": 0,
             })
     conn.close()
     if not rows:
         raise ValueError("daily packet contains no review items")
     synthetic_error = {
-        "problem_text": "今日到期复习共 " + str(len(rows)) + " 项。每项先回忆原错因，再独立完成同类题。",
+        "problem_text": (
+            f"今日到期复习共 {len(error_summaries)} 组，含 {len(rows)} 道练习。"
+            "每组先回忆原错因，再独立完成同类型推荐题。"
+        ),
         "cause_code": None,
     }
     return synthetic_error, rows, knowledge, str(packet.get("date") or "daily")
+
+
+def load_exam_packet(
+    db_path: Path, packet_path: Path
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[str], str]:
+    """Load a formal exam packet, accepting only verified canonical-bank items."""
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    if packet.get("schema") != "math-exam-packet/v1":
+        raise ValueError("unsupported exam packet")
+    sections = packet.get("sections") or []
+    if not sections:
+        raise ValueError("exam packet contains no sections")
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    calculated_score = 0
+    try:
+        for section_index, section in enumerate(sections, start=1):
+            questions = section.get("questions") or []
+            if not questions:
+                raise ValueError(f"exam section {section_index} contains no questions")
+            for question in questions:
+                question_id = str(question.get("question_id") or "").strip()
+                if not question_id:
+                    raise ValueError("exam question is missing question_id")
+                if question_id in seen:
+                    raise ValueError(f"duplicate exam question: {question_id}")
+                seen.add(question_id)
+                row = conn.execute(
+                    """SELECT id AS question_id,stem,options_json,answer,solution,
+                              difficulty,source_name,verified,question_type
+                       FROM questions WHERE id=?""",
+                    (question_id,),
+                ).fetchone()
+                if not row:
+                    raise ValueError(f"exam question not found: {question_id}")
+                if not row["verified"]:
+                    raise ValueError(f"exam question is not verified: {question_id}")
+                score = int(question.get("score") or 0)
+                if score <= 0:
+                    raise ValueError(f"invalid score for exam question: {question_id}")
+                calculated_score += score
+                record = dict(row)
+                record.update({
+                    "rank": len(rows) + 1,
+                    "score": score,
+                    "reason": str(question.get("reason") or "已验证期中范围题"),
+                    "stem": str(question.get("display_stem") or row["stem"]),
+                    "answer_space_mm": float(question.get("answer_space_mm") or 0),
+                    "min_start_space_mm": float(question.get("min_start_space_mm") or 0),
+                    "section_index": section_index,
+                    "section_title": str(section.get("title") or f"第{section_index}部分"),
+                    "section_instruction": str(section.get("instruction") or ""),
+                })
+                rows.append(record)
+    finally:
+        conn.close()
+
+    declared_score = int(packet.get("total_score") or calculated_score)
+    if declared_score != calculated_score:
+        raise ValueError(
+            f"exam total_score mismatch: declared {declared_score}, calculated {calculated_score}"
+        )
+    exam_id = str(packet.get("exam_id") or packet_path.stem).strip()
+    meta = {
+        "exam_id": exam_id,
+        "title": str(packet.get("title") or "高中数学阶段考试卷"),
+        "subtitle": str(packet.get("subtitle") or ""),
+        "duration_minutes": int(packet.get("duration_minutes") or 120),
+        "total_score": declared_score,
+        "instructions": [str(item) for item in (packet.get("instructions") or [])],
+        "show_provenance": bool(packet.get("show_provenance", True)),
+    }
+    knowledge = [str(item) for item in (packet.get("knowledge") or [])]
+    return meta, rows, knowledge, exam_id
 
 
 def _cause_name(cause_code: str | None) -> str:
@@ -814,6 +894,23 @@ def print_pdf(pdf: Path, printer: str | None) -> None:
     subprocess.run(command, check=True, timeout=60)
 
 
+def identifier_label(question_id: str) -> str:
+    return "错题编号" if question_id.startswith("ERR-") else "题库编号"
+
+
+def daily_group_heading(row: dict[str, Any]) -> str:
+    """Fixed daily-review group heading: one main number per saved error."""
+    return f"{row['rank']}　错题编号 {row['daily_error_id']}"
+
+
+def daily_recommendation_heading(row: dict[str, Any]) -> str:
+    """Fixed nested heading; recommendations never consume a main number."""
+    return (
+        f"同类型推荐题 {row['daily_recommendation_index']}　题库编号 "
+        f"{row['question_id']}（难度 {row['difficulty']}/5）"
+    )
+
+
 def create_pdf(
     output: Path,
     error_id: str,
@@ -823,6 +920,7 @@ def create_pdf(
     include_answers: bool = False,
     knowledge_names: list[str] | None = None,
     project_name: str = DEFAULT_PROJECT_NAME,
+    exam_meta: dict[str, Any] | None = None,
 ) -> None:
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER
@@ -868,7 +966,8 @@ def create_pdf(
         canvas.saveState()
         canvas.setFont(font, 8)
         canvas.setFillColor(colors.HexColor("#667085"))
-        canvas.drawString(18 * mm, 12 * mm, f"{project_name} · {error_id}")
+        footer_label = exam_meta["title"] if exam_meta else f"{project_name} · {error_id}"
+        canvas.drawString(18 * mm, 12 * mm, footer_label)
         canvas.drawRightString(192 * mm, 12 * mm, f"第 {doc.page} 页")
         canvas.restoreState()
 
@@ -905,54 +1004,158 @@ def create_pdf(
         return flows
 
     output.parent.mkdir(parents=True, exist_ok=True)
+    document_title = exam_meta["title"] if exam_meta else f"{project_name} · 针对性练习 {error_id}"
     doc = SimpleDocTemplate(
         str(output), pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm,
         topMargin=17 * mm, bottomMargin=19 * mm,
-        title=f"{project_name} · 针对性练习 {error_id}", author=project_name,
+        title=document_title, author=project_name,
     )
     knowledge_names = knowledge_names or []
-    info_bits: list[str] = []
-    if knowledge_names:
-        info_bits.append("知识点：" + "、".join(html.escape(name) for name in knowledge_names))
-    cause_label = _cause_name(error["cause_code"])
-    if cause_label:
-        info_bits.append(f"错因：{html.escape(cause_label)}")
-    story = [Paragraph(f"{html.escape(project_name)}<br/><font size='11'>错因针对性练习</font>", title)]
-    story.extend(text_flowables(error["problem_text"], body, prefix="<b>错题原题：</b>"))
-    story.extend([
-        Paragraph("　　".join(info_bits) if info_bits else "知识点：—", body),
-        Paragraph(
-            "姓名：____________　日期：____________　先独立完成，全部做完后拍照发给我判。",
-            body,
-        ),
-        HRFlowable(width="100%", thickness=1, color=colors.HexColor("#84ADFF")),
-    ])
-    for row in items:
-        if row["rank"] > 1:
-            story.append(CondPageBreak(80 * mm))
-        story.append(
-            Paragraph(f"{row['rank']}　题库编号 {row['question_id']}（难度 {row['difficulty']}/5）", heading)
-        )
-        story.extend(text_flowables(row["stem"], body))
-        if row["options_json"]:
-            options = json.loads(row["options_json"])
-            story.append(Paragraph("<br/>".join(paragraph_text(item) for item in options), body))
+    if exam_meta:
+        subtitle = html.escape(exam_meta.get("subtitle") or "")
+        title_html = html.escape(exam_meta["title"])
+        if subtitle:
+            title_html += f"<br/><font size='11'>{subtitle}</font>"
+        story = [Paragraph(title_html, title)]
         story.extend([
-            Paragraph(f"推荐理由：{paragraph_text(row['reason'], 8.5)}<br/>来源：{paragraph_text(row['source_name'], 8.5)}", meta),
-            Spacer(1, 22 * mm),
+            Paragraph(
+                f"考试时间：{exam_meta['duration_minutes']} 分钟　满分：{exam_meta['total_score']} 分",
+                body,
+            ),
+            Paragraph("姓名：____________　班级：____________　得分：____________", body),
         ])
+        for index, instruction in enumerate(exam_meta.get("instructions") or [], start=1):
+            story.append(Paragraph(f"{index}. {paragraph_text(instruction)}", meta))
+        if knowledge_names:
+            story.append(Paragraph("范围：" + "、".join(html.escape(name) for name in knowledge_names), meta))
+        story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#84ADFF")))
+        current_section = None
+        for row in items:
+            if row["section_index"] != current_section:
+                current_section = row["section_index"]
+                if row["rank"] > 1:
+                    story.append(PageBreak())
+                story.append(Paragraph(html.escape(row["section_title"]), heading))
+                if row["section_instruction"]:
+                    story.append(Paragraph(paragraph_text(row["section_instruction"]), body))
+            elif row["rank"] > 1:
+                min_start_space = row.get("min_start_space_mm") or 55
+                story.append(CondPageBreak(min_start_space * mm))
+            story.append(Paragraph(f"{row['rank']}．（{row['score']} 分）", heading))
+            story.extend(text_flowables(row["stem"], body))
+            if row["options_json"]:
+                options = json.loads(row["options_json"])
+                story.append(Paragraph("<br/>".join(paragraph_text(item) for item in options), body))
+            if exam_meta.get("show_provenance", True):
+                story.append(Paragraph(
+                    f"题源：{paragraph_text(row['source_name'], 8.5)}　选题理由：{paragraph_text(row['reason'], 8.5)}",
+                    meta,
+                ))
+            answer_space = row["answer_space_mm"]
+            if answer_space <= 0:
+                answer_space = 7 if row["options_json"] else (45 if "解答" in str(row["question_type"]) else 14)
+            story.append(Spacer(1, answer_space * mm))
+    else:
+        info_bits: list[str] = []
+        if knowledge_names:
+            info_bits.append("知识点：" + "、".join(html.escape(name) for name in knowledge_names))
+        cause_label = _cause_name(error["cause_code"])
+        if cause_label:
+            info_bits.append(f"错因：{html.escape(cause_label)}")
+        story = [Paragraph(f"{html.escape(project_name)}<br/><font size='11'>错因针对性练习</font>", title)]
+        story.extend(text_flowables(error["problem_text"], body, prefix="<b>错题原题：</b>"))
+        story.extend([
+            Paragraph("　　".join(info_bits) if info_bits else "知识点：—", body),
+            Paragraph(
+                "姓名：____________　日期：____________　先独立完成，全部做完后拍照发给我判。",
+                body,
+            ),
+            HRFlowable(width="100%", thickness=1, color=colors.HexColor("#84ADFF")),
+        ])
+        for row in items:
+            if isinstance(row, dict) and "daily_group_start" in row:
+                if row["daily_group_start"]:
+                    if row["rank"] > 1:
+                        story.append(CondPageBreak(80 * mm))
+                    story.append(
+                        Paragraph(
+                            daily_group_heading(row),
+                            heading,
+                        )
+                    )
+                    story.extend(
+                        text_flowables(
+                            row["daily_problem_text"], body, prefix="<b>错题回顾：</b>"
+                        )
+                    )
+                else:
+                    story.append(CondPageBreak(55 * mm))
+                recommendation_index = row["daily_recommendation_index"]
+                if recommendation_index:
+                    story.append(
+                        Paragraph(
+                            daily_recommendation_heading(row),
+                            heading,
+                        )
+                    )
+                    story.extend(text_flowables(row["stem"], body))
+                    if row["options_json"]:
+                        options = json.loads(row["options_json"])
+                        story.append(
+                            Paragraph(
+                                "<br/>".join(paragraph_text(item) for item in options), body
+                            )
+                        )
+                story.extend([
+                    Paragraph(
+                        f"推荐理由：{paragraph_text(row['reason'], 8.5)}<br/>"
+                        f"来源：{paragraph_text(row['source_name'], 8.5)}",
+                        meta,
+                    ),
+                    Spacer(1, 22 * mm),
+                ])
+                continue
+            if row["rank"] > 1:
+                story.append(CondPageBreak(80 * mm))
+            story.append(
+                Paragraph(
+                    f"{row['rank']}　{identifier_label(str(row['question_id']))} "
+                    f"{row['question_id']}（难度 {row['difficulty']}/5）",
+                    heading,
+                )
+            )
+            story.extend(text_flowables(row["stem"], body))
+            if row["options_json"]:
+                options = json.loads(row["options_json"])
+                story.append(Paragraph("<br/>".join(paragraph_text(item) for item in options), body))
+            story.extend([
+                Paragraph(f"推荐理由：{paragraph_text(row['reason'], 8.5)}<br/>来源：{paragraph_text(row['source_name'], 8.5)}", meta),
+                Spacer(1, 22 * mm),
+            ])
 
     if include_answers:
         story.extend([PageBreak(), Paragraph("答案与解析", title)])
         for row in items:
-            if row["rank"] > 1:
+            is_daily_row = isinstance(row, dict) and "daily_group_start" in row
+            if is_daily_row and row["daily_group_start"]:
+                if row["rank"] > 1:
+                    story.append(CondPageBreak(100 * mm))
+                story.append(
+                    Paragraph(daily_group_heading(row), heading)
+                )
+            elif not is_daily_row and row["rank"] > 1:
                 story.append(CondPageBreak(100 * mm))
             solution_stripped, solution_images = split_stem_images(row["solution"])
             solution, truncated = truncate_clean_text(solution_stripped, solution_chars)
             if truncated:
                 solution += "……（完整解析保存在题库中）"
+            answer_heading = (
+                f"同类型推荐题 {row['daily_recommendation_index']}　{row['question_id']}"
+                if is_daily_row and row["daily_recommendation_index"]
+                else ("错题原题" if is_daily_row else f"{row['rank']}　{row['question_id']}")
+            )
             story.extend([
-                Paragraph(f"{row['rank']}　{row['question_id']}", heading),
+                Paragraph(answer_heading, heading),
                 Paragraph(f"<b>答案：</b>{paragraph_text(row['answer'])}", body),
                 Paragraph(paragraph_text(solution) or "题库暂无解析。", body),
             ])
@@ -967,9 +1170,10 @@ def create_pdf(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate a compact A4 practice PDF")
+    parser = argparse.ArgumentParser(description="Generate an A4 practice sheet or exam")
     parser.add_argument("error_id", nargs="?")
     parser.add_argument("--daily-packet", type=Path)
+    parser.add_argument("--exam-packet", type=Path)
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--output", type=Path)
@@ -983,8 +1187,8 @@ def parse_args() -> argparse.Namespace:
         help="生成的 PDF 附答案页（默认不附答案：孩子做完后拍照判题）",
     )
     args = parser.parse_args()
-    if bool(args.error_id) == bool(args.daily_packet):
-        parser.error("provide exactly one error_id or --daily-packet")
+    if sum(bool(item) for item in (args.error_id, args.daily_packet, args.exam_packet)) != 1:
+        parser.error("provide exactly one error_id, --daily-packet, or --exam-packet")
     return args
 
 
@@ -995,10 +1199,16 @@ def main() -> int:
     if args.daily_packet:
         error, items, knowledge_names, packet_date = load_daily_packet(args.db, args.daily_packet)
         document_id = f"daily-review-{packet_date}"
+        exam_meta = None
+    elif args.exam_packet:
+        exam_meta, items, knowledge_names, document_id = load_exam_packet(args.db, args.exam_packet)
+        error = {"problem_text": "", "cause_code": None}
     else:
         error, items, knowledge_names = load_items(args.db, args.error_id)
         document_id = args.error_id
-    output = args.output or (PROJECT_ROOT / "output" / "pdf" / f"{document_id}-practice.pdf")
+        exam_meta = None
+    default_suffix = "exam" if exam_meta else "practice"
+    output = args.output or (PROJECT_ROOT / "output" / "pdf" / f"{document_id}-{default_suffix}.pdf")
     # 默认不附答案页（孩子做完后拍照判题）；--with-answers 或配置项可显式打开。
     include_answers = bool(args.with_answers or config.get("answers_after_questions", False))
     project_name = str(config.get("project_name") or DEFAULT_PROJECT_NAME).strip()
@@ -1007,6 +1217,7 @@ def main() -> int:
         include_answers=include_answers,
         knowledge_names=knowledge_names,
         project_name=project_name,
+        exam_meta=exam_meta,
     )
     printer = args.printer or config.get("printer_name")
     if args.do_print:
@@ -1018,6 +1229,7 @@ def main() -> int:
                 include_answers=False,
                 knowledge_names=knowledge_names,
                 project_name=project_name,
+                exam_meta=exam_meta,
             )
             try:
                 print_pdf(questions_only, printer)
@@ -1028,6 +1240,7 @@ def main() -> int:
     print(json.dumps({
         "pdf": str(output.resolve()),
         "questions": len(items),
+        "document_type": "exam" if exam_meta else "practice",
         "with_answers": include_answers,
         "printed": bool(args.do_print),
         "print_scope": ("questions-only" if include_answers else "all") if args.do_print else None,

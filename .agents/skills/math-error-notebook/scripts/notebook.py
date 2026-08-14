@@ -9,6 +9,7 @@ import difflib
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -2944,6 +2945,9 @@ def doctor(
         SKILL_DIR / "scripts" / "photo_ocr.py",
         SKILL_DIR / "scripts" / "paddle_formula_worker.py",
         SKILL_DIR / "scripts" / "math_notebook_project_paths.py",
+        SKILL_DIR / "scripts" / "deepseek_worker.py",
+        SKILL_DIR / "scripts" / "safe_init.py",
+        SKILL_DIR / "scripts" / "requirements-deepseek.txt",
         SKILL_DIR / "scripts" / "requirements-pdf.txt",
         SKILL_DIR / "assets" / "error-analysis-template.json",
         SKILL_DIR / "assets" / "question-review-template.json",
@@ -3038,6 +3042,15 @@ def doctor(
             "local_processing": "exif_transpose_white_background_resize_only",
             "remote_visual_review_required": default_preflight_mode == "remote",
         },
+        "deepseek_harness": {
+            "available": all(
+                (SKILL_DIR / "scripts" / name).is_file()
+                for name in ("deepseek_worker.py", "safe_init.py", "requirements-deepseek.txt")
+            ),
+            "runtime_present": (project_root / ".runtime" / "deepseek").is_dir(),
+            "api_key_configured": bool(os.getenv("DEEPSEEK_API_KEY")),
+            "database_write_allowed": False,
+        },
         "search_index": search_index_status(conn),
         "text_encoding": encoding_status,
         "printer": config.get("printer_name"),
@@ -3106,6 +3119,7 @@ AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
             "features --text <structure> --json",
             "grade-preview <analysis.json> --json",
             "grade-commit <analysis.json> --copy-image --json",
+            "deepseek_worker.py <typed-or-reviewed-evidence.json> --task grade --out <candidate.json>; review_required never commits",
             "recommend-packet <error-id> --out <packet.json> --json",
         ],
         "optional_reference": "references/error-taxonomy.md only when cause selection is ambiguous",
@@ -3114,6 +3128,7 @@ AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
         "commands": [
             "behavior-cases --category recommend --json",
             "recommend-packet <error-id> --limit 3 --keyword <type> --feature <code> --out <packet.json> --json",
+            "deepseek_worker.py <packet.json> --task recommend --out <reviewed.json>; then review before assign-recommendations",
             "assign-recommendations <error-id> <packet.json> --save --json",
             "question <id> --json only for an ambiguous shortlisted item",
             "practice_sheet.py <error-id>",
@@ -3126,6 +3141,7 @@ AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
             "audit-queue --simplified-only --limit <n> --json",
             "prepare-audit-batch --simplified-only --limit <n> --out-dir <dir> --json",
             "prepare-audit-batch --source-name <source> --limit <n> --out-dir <dir> --json",
+            "deepseek_worker.py <audit-manifest.json> --task verify --out <decisions.json>; visual/low-confidence items escalate",
             "prepare-review-batch <concise-decisions.json> --out-dir <dir> --json",
             "verify-item <question-id> <review.json> --json",
             "verify-review-batch <manifest.json> --json",

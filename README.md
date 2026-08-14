@@ -96,6 +96,7 @@ flowchart LR
 - **复习闭环**：记录作答结果、复习日期、薄弱知识点和重复错因，生成每日复习任务。
 - **试卷入库**：导入用户授权的 DOCX、PDF 及结构化题目，经过质量门和逐题审核后进入主库。
 - **低 Token 工作流**：图片尺寸控制、批量审核包、结构化决策扩展和 SymPy 预检均由本地脚本完成；远端只接收适合判读的标准化预览。
+- **可控的 DeepSeek Harness**：可把文字判题分析、文本题审核候选、推荐复核和标签建议交给 DeepSeek；本地程序校验输入、ID、标签和置信度，DeepSeek 不直接写题库。
 
 ## 工作流程
 
@@ -145,6 +146,15 @@ PaddleOCR 公式识别为可选能力：
 ```powershell
 python -X utf8 -B -m pip install -r requirements-paddleocr.txt
 ```
+
+DeepSeek Harness 为可选能力，依赖隔离安装到项目运行目录：
+
+```powershell
+python -X utf8 -B -m pip install --target .runtime\deepseek `
+  -r .agents\skills\math-error-notebook\scripts\requirements-deepseek.txt
+```
+
+API Key 仅通过 `DEEPSEEK_API_KEY` 环境变量读取，不写入仓库或候选文件。
 
 ## 快速开始
 
@@ -255,6 +265,31 @@ python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py verify-
 python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py audit-item <题目ID> --json
 python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py verify-item <题目ID> <审核JSON> --json
 ```
+
+### 将文本任务下放给 DeepSeek Harness
+
+```powershell
+# 文字作答或已由视觉模型完成可信转录的判题证据；JSON 必须声明 student_work_has_steps
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\deepseek_worker.py `
+  <证据JSON> --task grade --out <判题候选JSON>
+
+# 审核包：含图题、低置信度和矛盾项会自动交回 Codex
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\deepseek_worker.py `
+  <审核manifest.json> --task verify --out <精简决策JSON>
+
+# 只允许从 recommend-packet 提供的已验证候选中选择
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\deepseek_worker.py `
+  <推荐审核包JSON> --task recommend --out <已复核推荐JSON>
+
+# 仅产生标签候选，不修改题目
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\deepseek_worker.py `
+  <题目JSON> --task tag --out <标签候选JSON>
+```
+
+该入口始终返回 `database_modified=false`。输出中的 `next_command` 只是后续
+人工/Codex 复核提示；正式写入仍须通过 `grade-commit`、
+`verify-review-batch`、`assign-recommendations` 或 `annotate` 的权威质量门。
+DeepSeek 无视觉输入时不得判读照片，含图审核也会自动升级给具备视觉能力的模型。
 
 ## 下载目录自动入库
 

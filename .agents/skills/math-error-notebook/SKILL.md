@@ -20,6 +20,45 @@ description: Manage a Chinese high-school math error notebook backed by one loca
 - `--json` is compact by default. Use global `--pretty-json` only for human inspection. `search`, `recommend`, and `audit-queue` omit long solutions/raw records unless `--full` is explicit.
 - Before imports or maintenance, run `bank-info --json`. Run `init` then idempotent `seed` only when the canonical bank does not exist.
 
+## DeepSeek Harness delegation
+
+Use `scripts/deepseek_worker.py` when a DeepSeek API session should handle more
+text reasoning without receiving database authority. The worker supports four
+bounded tasks: `grade`, `verify`, `recommend`, and `tag`. It uses
+`scripts/safe_init.py`, writes only review candidates, runs deterministic local
+gates, and always reports `database_modified=false`.
+
+```powershell
+python -X utf8 -B <skill-dir>\scripts\deepseek_worker.py <input.json> --task grade --out <candidate.json>
+python -X utf8 -B <skill-dir>\scripts\deepseek_worker.py <audit-manifest.json> --task verify --out <decisions.json>
+python -X utf8 -B <skill-dir>\scripts\deepseek_worker.py <recommend-packet.json> --task recommend --out <reviewed.json>
+python -X utf8 -B <skill-dir>\scripts\deepseek_worker.py <question.json> --task tag --out <tags.json>
+```
+
+- `grade` accepts typed evidence or a completed, trusted visual transcription.
+  Evidence must state `student_work_has_steps=true|false`; a final answer without
+  visible steps is always escalated because its specific cause cannot be inferred.
+  DeepSeek never chooses the image path or question identity. Photo viewing and
+  ambiguous handwriting remain with a vision-capable model.
+- `verify` accepts `audit-item` packets or a `prepare-audit-batch` manifest.
+  Image-dependent, omitted, conflicting, or low-confidence items are escalated
+  and cannot enter the prepared review batch.
+- `recommend` may only select IDs already present in a locally generated
+  `recommend-packet`, so unverified questions cannot be introduced.
+- `tag` produces catalog-validated metadata suggestions and never edits a
+  question. Review the candidate before using `annotate`.
+- A returned `next_command` is a handoff, not permission to run it blindly.
+  Codex or a human must review the candidate before any `grade-commit`,
+  `verify-review-batch`, `assign-recommendations`, or `annotate` write.
+- `--thinking auto` enables reasoning for `grade` and `verify`, and disables it
+  for `recommend` and `tag`. Use environment variables or `--model` to override
+  model names. API keys are read only from `DEEPSEEK_API_KEY`.
+- Install the optional client into the project runtime rather than system Python:
+
+```powershell
+python -X utf8 -B -m pip install --target <project-root>\.runtime\deepseek -r <skill-dir>\scripts\requirements-deepseek.txt
+```
+
 ## First-run onboarding
 
 When the user says the Skill was just installed, asks how to begin, or has not

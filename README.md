@@ -170,7 +170,6 @@ API Key 仅通过 `DEEPSEEK_API_KEY` 环境变量读取，不写入仓库或候�
 `LIZHAOLIN_MATH_NOTEBOOK_ROOT` 指定的项目；未设置时，从当前工作目录向上寻找
 `data/math_notebook.db`。因此，使用本项目现有题库时应先在 Codex 中打开本仓库目录。
 生产题库、学生照片和学习记录不会随 GitHub Skill 分发；在新目录首次建立空白错题本时，才运行 `init` 和 `seed`。
-跨学科下载监听器及其配置、启动脚本也不属于 Skill 安装包；它们只保留在完整项目仓库中，按需单独部署。
 
 安装后最简单的开始方式是，在 Codex 中打开原错题本项目文件夹并说：
 
@@ -291,28 +290,16 @@ python -X utf8 -B .agents\skills\math-error-notebook\scripts\deepseek_worker.py 
 `verify-review-batch`、`assign-recommendations` 或 `annotate` 的权威质量门。
 DeepSeek 无视觉输入时不得判读照片，含图审核也会自动升级给具备视觉能力的模型。
 
-## 下载目录自动入库
-
-跨学科监听统一使用：
-
-- `services/exam_ingest_watcher.py`
-- `config/exam-ingest-watcher.json`
-
-监听器只编排数学、物理、化学项目已有的转换器和权威 CLI，不直接写数据库。仅在质量门、导入结果和 `bank-info` 完整性均通过，或权威入口确认重复时，源试卷才会移至 E 盘归档目录。
-
-详细说明见 [`docs/EXAM_INGEST_WATCHER.md`](docs/EXAM_INGEST_WATCHER.md)。
-
 ## 目录结构
 
 ```text
 .
 ├─ .agents/skills/math-error-notebook/  # 项目 Skill、权威 CLI、模板与数据规范
 ├─ assets/branding/                     # Logo、图标和品牌资源
-├─ config/                              # 项目与监听器配置
+├─ config/                              # 项目配置
 ├─ data/                                # 本地主库、导入与审核数据（大部分不提交 Git）
 ├─ docs/                                # 专项文档
 ├─ scripts/                             # 导入、审核、提取和维护脚本
-├─ services/                            # 长期运行的监听服务
 ├─ tests/                               # 自动化测试
 ├─ AGENTS.md                            # 所有智能体必须遵守的项目规则
 └─ PROJECT_ARCHITECTURE.md              # 完整架构和防重复开发索引

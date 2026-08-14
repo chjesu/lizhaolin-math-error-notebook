@@ -80,7 +80,7 @@ operation.
    generating a questions-only PDF. State that answers and printing are opt-in.
 5. If binding or health checks fail, explain the single next action in plain
    language. Do not create a second database, search the computer for another
-   bank, or install the optional download watcher.
+   bank.
 
 ## Grade work
 

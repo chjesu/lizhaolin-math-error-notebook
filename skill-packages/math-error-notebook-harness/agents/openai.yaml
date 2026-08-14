@@ -1,0 +1,7 @@
+interface:
+  display_name: "李兆霖数学错题本（Harness省Token版）"
+  short_description: "让 DeepSeek 处理安全文字任务，Codex 负责视觉与最终复核"
+  default_prompt: "使用 $math-error-notebook-harness 连接当前数学错题本，并优先把适合的文字任务交给 DeepSeek Harness。"
+
+policy:
+  allow_implicit_invocation: true

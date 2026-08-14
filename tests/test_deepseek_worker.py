@@ -6,7 +6,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT_DIR = ROOT / ".agents/skills/math-error-notebook/scripts"
+SCRIPT_DIR = ROOT / "skill-packages/math-error-notebook-harness/scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 SPEC = importlib.util.spec_from_file_location(
     "deepseek_worker",

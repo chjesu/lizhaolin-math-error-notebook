@@ -821,6 +821,7 @@ class NotebookTests(unittest.TestCase):
         self.assertEqual(handoff["defaults"], {"answers": False, "print": False})
         health = notebook.doctor(self.conn, self.db, ROOT)
         self.assertTrue(health["checks"]["utf8_project_files"])
+        self.assertFalse(health["deepseek_harness"]["available"])
         self.assertEqual(health["text_encoding"]["policy"], "UTF-8")
         self.assertEqual(
             health["text_encoding"]["powershell_read_command"],
@@ -828,6 +829,9 @@ class NotebookTests(unittest.TestCase):
         )
         grade_context = notebook.agent_context(
             self.conn, self.db, ROOT, "grade"
+        )
+        self.assertFalse(
+            any("deepseek_worker.py" in command for command in grade_context["commands"])
         )
         self.assertTrue(
             any("下一步" in rule for rule in grade_context["critical_rules"])

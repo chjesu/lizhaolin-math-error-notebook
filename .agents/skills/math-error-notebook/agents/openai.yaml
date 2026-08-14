@@ -1,7 +1,7 @@
 interface:
-  display_name: "李兆霖数学错题本"
-  short_description: "错题批改、错因诊断、已验证题推荐、PDF打印与复习追踪"
-  default_prompt: "使用 $math-error-notebook 检查并连接当前数学错题本；首次使用时在确认后初始化，然后引导我进行照片判题、推荐练习、复习或试卷导入。"
+  display_name: "李兆霖数学错题本（纯 Codex 版）"
+  short_description: "由 Codex 完成判题、审核、推荐、PDF与复习追踪"
+  default_prompt: "使用 $math-error-notebook 检查并连接当前数学错题本，由 Codex 完成照片判题、审核、推荐、复习或试卷导入。"
 
 policy:
   allow_implicit_invocation: true

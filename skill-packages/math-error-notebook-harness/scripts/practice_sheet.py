@@ -1,0 +1,1260 @@
+#!/usr/bin/env python3
+"""Create and optionally print A4 practice sheets or verified-question exams."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import html
+import itertools
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from math_notebook_project_paths import resolve_project_root
+
+SKILL_DIR = SCRIPT_DIR.parent
+PROJECT_ROOT = resolve_project_root(SKILL_DIR)
+DEFAULT_DB = PROJECT_ROOT / "data" / "math_notebook.db"
+DEFAULT_CONFIG = PROJECT_ROOT / "config" / "math-error-notebook.json"
+DEFAULT_PROJECT_NAME = "李兆霖数学错题本"
+LOCAL_PDF_RUNTIME = PROJECT_ROOT / "runtime" / "pdf"
+PDF_REQUIREMENTS = PROJECT_ROOT / "requirements-pdf.txt"
+if not PDF_REQUIREMENTS.is_file():
+    PDF_REQUIREMENTS = SCRIPT_DIR / "requirements-pdf.txt"
+MPL_CONFIG_DIR = PROJECT_ROOT / "tmp" / "pdfs" / "matplotlib"
+BUNDLED_PYTHON = (
+    Path.home() / ".cache" / "codex-runtimes" / "codex-primary-runtime"
+    / "dependencies" / "python" / "python.exe"
+)
+
+# The project-local PDF runtime contains native wheels for the bundled Python.
+# Do not expose those wheels to another Python ABI merely because find_spec()
+# can see them.  Under the bundled interpreter, preload its working Pillow
+# before adding the local runtime, which supplies matplotlib and other pinned
+# packages without shadowing Pillow with a stale/broken copy.
+_running_bundled_python = (
+    BUNDLED_PYTHON.is_file()
+    and Path(sys.executable).resolve() == BUNDLED_PYTHON.resolve()
+)
+if _running_bundled_python:
+    try:
+        import PIL.Image  # noqa: F401
+    except ImportError:
+        pass
+if (
+    LOCAL_PDF_RUNTIME.is_dir()
+    and (_running_bundled_python or not BUNDLED_PYTHON.is_file())
+    and str(LOCAL_PDF_RUNTIME) not in sys.path
+):
+    sys.path.insert(0, str(LOCAL_PDF_RUNTIME))
+MPL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(MPL_CONFIG_DIR))
+
+
+def bundled_python() -> Path | None:
+    return BUNDLED_PYTHON if BUNDLED_PYTHON.is_file() else None
+
+
+def missing_pdf_modules() -> list[str]:
+    required = {
+        "reportlab": "reportlab.lib.colors",
+        "Pillow": "PIL.Image",
+        "matplotlib": "matplotlib",
+    }
+    missing: list[str] = []
+    for name, module in required.items():
+        try:
+            __import__(module)
+        except (ImportError, OSError):
+            missing.append(name)
+    return missing
+
+
+def ensure_pdf_runtime() -> None:
+    missing = missing_pdf_modules()
+    if not missing:
+        return
+    python = bundled_python()
+    if python and Path(sys.executable).resolve() != python.resolve():
+        completed = subprocess.run([str(python), str(Path(__file__).resolve()), *sys.argv[1:]])
+        raise SystemExit(completed.returncode)
+    install = (
+        f'"{sys.executable}" -m pip install --target "{LOCAL_PDF_RUNTIME}" '
+        f'-r "{PDF_REQUIREMENTS}"'
+    )
+    raise RuntimeError(
+        "PDF runtime is incomplete (missing: " + ", ".join(missing) + "). "
+        "Install the project dependencies once with: " + install
+    )
+
+
+def load_config(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_items(
+    db_path: Path, error_id: str
+) -> tuple[sqlite3.Row, list[sqlite3.Row], list[str]]:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    error = conn.execute("SELECT * FROM errors WHERE id=?", (error_id,)).fetchone()
+    if not error:
+        conn.close()
+        raise ValueError(f"error not found: {error_id}")
+    rows = conn.execute(
+        """SELECT r.rank,r.reason,q.id AS question_id,q.stem,q.options_json,q.answer,
+                  q.solution,q.difficulty,q.source_name
+           FROM recommendations r JOIN questions q ON q.id=r.question_id
+           WHERE r.error_id=? AND q.verified=1 ORDER BY r.rank""",
+        (error_id,),
+    ).fetchall()
+    knowledge_names = [
+        item[0]
+        for item in conn.execute(
+            """SELECT kp.name FROM error_knowledge ek
+               JOIN knowledge_points kp ON kp.code = ek.knowledge_code
+               WHERE ek.error_id=? ORDER BY kp.name""",
+            (error_id,),
+        )
+    ]
+    conn.close()
+    if not rows:
+        raise ValueError("no saved verified recommendations for this error")
+    return error, rows, knowledge_names
+
+
+def load_daily_packet(
+    db_path: Path, packet_path: Path
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[str], str]:
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    if packet.get("schema") != "math-daily-review-packet/v1":
+        raise ValueError("unsupported daily review packet")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows: list[dict[str, Any]] = []
+    knowledge: list[str] = []
+    error_summaries: list[str] = []
+    for group_rank, item in enumerate(packet.get("items") or [], start=1):
+        questions = item.get("questions")
+        if questions is None:
+            questions = [item.get("question") or {}]
+        included_for_error = 0
+        for question in questions:
+            question_id = question.get("question_id")
+            if not question_id:
+                continue
+            row = conn.execute(
+                """SELECT id AS question_id,stem,options_json,answer,solution,
+                          difficulty,source_name,verified
+                   FROM questions WHERE id=?""",
+                (question_id,),
+            ).fetchone()
+            if not row or not row["verified"]:
+                continue
+            included_for_error += 1
+            if included_for_error == 1:
+                error_summaries.append(f"{group_rank}. {item['problem_text']}")
+            for name in item.get("knowledge") or []:
+                if name not in knowledge:
+                    knowledge.append(name)
+            record = dict(row)
+            record.update({
+                "rank": group_rank,
+                "reason": question.get("reason") or f"到期复习：{item['error_id']}",
+                "daily_group_start": included_for_error == 1,
+                "daily_error_id": item["error_id"],
+                "daily_problem_text": item["problem_text"],
+                "daily_recommendation_index": included_for_error,
+            })
+            rows.append(record)
+        if included_for_error == 0:
+            error_summaries.append(f"{group_rank}. {item['problem_text']}")
+            for name in item.get("knowledge") or []:
+                if name not in knowledge:
+                    knowledge.append(name)
+            rows.append({
+                "question_id": item["error_id"],
+                "stem": f"错题回顾：{item['problem_text']}",
+                "options_json": None,
+                "answer": "",
+                "solution": "",
+                "difficulty": item.get("difficulty") or 0,
+                "source_name": "李兆霖数学错题本",
+                "rank": group_rank,
+                "reason": "本阶段暂无已复核推荐题，仅复习错题原题。",
+                "daily_group_start": True,
+                "daily_error_id": item["error_id"],
+                "daily_problem_text": item["problem_text"],
+                "daily_recommendation_index": 0,
+            })
+    conn.close()
+    if not rows:
+        raise ValueError("daily packet contains no review items")
+    synthetic_error = {
+        "problem_text": (
+            f"今日到期复习共 {len(error_summaries)} 组，含 {len(rows)} 道练习。"
+            "每组先回忆原错因，再独立完成同类型推荐题。"
+        ),
+        "cause_code": None,
+    }
+    return synthetic_error, rows, knowledge, str(packet.get("date") or "daily")
+
+
+def load_exam_packet(
+    db_path: Path, packet_path: Path
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[str], str]:
+    """Load a formal exam packet, accepting only verified canonical-bank items."""
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    if packet.get("schema") != "math-exam-packet/v1":
+        raise ValueError("unsupported exam packet")
+    sections = packet.get("sections") or []
+    if not sections:
+        raise ValueError("exam packet contains no sections")
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    calculated_score = 0
+    try:
+        for section_index, section in enumerate(sections, start=1):
+            questions = section.get("questions") or []
+            if not questions:
+                raise ValueError(f"exam section {section_index} contains no questions")
+            for question in questions:
+                question_id = str(question.get("question_id") or "").strip()
+                if not question_id:
+                    raise ValueError("exam question is missing question_id")
+                if question_id in seen:
+                    raise ValueError(f"duplicate exam question: {question_id}")
+                seen.add(question_id)
+                row = conn.execute(
+                    """SELECT id AS question_id,stem,options_json,answer,solution,
+                              difficulty,source_name,verified,question_type
+                       FROM questions WHERE id=?""",
+                    (question_id,),
+                ).fetchone()
+                if not row:
+                    raise ValueError(f"exam question not found: {question_id}")
+                if not row["verified"]:
+                    raise ValueError(f"exam question is not verified: {question_id}")
+                score = int(question.get("score") or 0)
+                if score <= 0:
+                    raise ValueError(f"invalid score for exam question: {question_id}")
+                calculated_score += score
+                record = dict(row)
+                record.update({
+                    "rank": len(rows) + 1,
+                    "score": score,
+                    "reason": str(question.get("reason") or "已验证期中范围题"),
+                    "stem": str(question.get("display_stem") or row["stem"]),
+                    "answer_space_mm": float(question.get("answer_space_mm") or 0),
+                    "min_start_space_mm": float(question.get("min_start_space_mm") or 0),
+                    "section_index": section_index,
+                    "section_title": str(section.get("title") or f"第{section_index}部分"),
+                    "section_instruction": str(section.get("instruction") or ""),
+                })
+                rows.append(record)
+    finally:
+        conn.close()
+
+    declared_score = int(packet.get("total_score") or calculated_score)
+    if declared_score != calculated_score:
+        raise ValueError(
+            f"exam total_score mismatch: declared {declared_score}, calculated {calculated_score}"
+        )
+    exam_id = str(packet.get("exam_id") or packet_path.stem).strip()
+    meta = {
+        "exam_id": exam_id,
+        "title": str(packet.get("title") or "高中数学阶段考试卷"),
+        "subtitle": str(packet.get("subtitle") or ""),
+        "duration_minutes": int(packet.get("duration_minutes") or 120),
+        "total_score": declared_score,
+        "instructions": [str(item) for item in (packet.get("instructions") or [])],
+        "show_provenance": bool(packet.get("show_provenance", True)),
+    }
+    knowledge = [str(item) for item in (packet.get("knowledge") or [])]
+    return meta, rows, knowledge, exam_id
+
+
+def _cause_name(cause_code: str | None) -> str:
+    """Resolve a cause code to its display name, reusing notebook.py's taxonomy."""
+    if not cause_code:
+        return ""
+    try:
+        if str(SCRIPT_DIR) not in sys.path:
+            sys.path.insert(0, str(SCRIPT_DIR))
+        import notebook
+        return notebook.CAUSE_CODES.get(cause_code, cause_code)
+    except Exception:
+        return cause_code
+
+
+MATH_CACHE_DIR = PROJECT_ROOT / "tmp" / "pdfs" / "math"
+MATH_CACHE_VERSION = "v3"
+_MATH_REGISTRY: dict[str, tuple[str, bool]] = {}
+_MATH_COUNTER = itertools.count()
+_HAS_CJK = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿＀-￯]")
+
+
+def _register_math(latex: str, display: bool = False) -> str:
+    token = f"ZZMATH{next(_MATH_COUNTER):04d}ZZ"
+    _MATH_REGISTRY[token] = (latex, display)
+    return token
+
+
+def _is_escaped(text: str, index: int) -> bool:
+    backslashes = 0
+    index -= 1
+    while index >= 0 and text[index] == "\\":
+        backslashes += 1
+        index -= 1
+    return bool(backslashes % 2)
+
+
+def _find_math_close(text: str, start: int, close: str) -> int:
+    index = start
+    while True:
+        index = text.find(close, index)
+        if index < 0:
+            return -1
+        if not _is_escaped(text, index):
+            return index
+        index += len(close)
+
+
+def _extract_math(text: str) -> str:
+    """Replace common LaTeX delimiters and bare ``\\sqrt{...}`` with placeholders.
+
+    Placeholders survive ``_latex_to_text`` and ``html.escape`` untouched and are
+    later swapped for inline mathtext images inside ``paragraph_text``, so all
+    mathematical notation is typeset (fractions, radicals, scripts, symbols)
+    instead of plain-text approximations like "(1)/(2)" or "√(x)".
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        if text.startswith(r"\$", i):
+            out.append("ZZLITERALDOLLARZZ")
+            i += 2
+            continue
+        opener = closer = ""
+        display = False
+        if text.startswith("$$", i):
+            opener = closer = "$$"
+            display = True
+        elif text.startswith(r"\[", i):
+            opener, closer, display = r"\[", r"\]", True
+        elif text.startswith(r"\(", i):
+            opener, closer = r"\(", r"\)"
+        elif text[i] == "$" and not _is_escaped(text, i):
+            opener = closer = "$"
+        if not opener:
+            out.append(text[i])
+            i += 1
+            continue
+        k = _find_math_close(text, i + len(opener), closer)
+        if k < 0:
+            out.append(opener)
+            i += len(opener)
+            continue
+        latex = text[i + len(opener):k]
+        out.append(_register_math(latex, display) if latex.strip() else "")
+        i = k + len(closer)
+    value = "".join(out)
+
+    # Historical error stems sometimes contain complete LaTeX fractions without
+    # surrounding math delimiters, for example ``\frac{17}{16}`` or
+    # ``\frac{\sqrt6}{2}``.  Keep the whole two-argument command together so it
+    # reaches mathtext instead of degrading to plain ``(17)/(16)`` text.  This
+    # intentionally targets only explicit TeX fraction commands; prose slashes
+    # and dates remain untouched.
+    out = []
+    i = 0
+    while i < len(value):
+        if value[i] != "\\":
+            out.append(value[i])
+            i += 1
+            continue
+        command = next(
+            (name for name in _FRAC_STYLE_COMMANDS if value.startswith(name, i)),
+            None,
+        )
+        if command is None:
+            out.append(value[i])
+            i += 1
+            continue
+        after = i + len(command)
+        if after < len(value) and value[after].isalpha():
+            out.append(value[i])
+            i += 1
+            continue
+        first = _read_math_token(value, after)
+        second = _read_math_token(value, first[1]) if first else None
+        if not first or not second:
+            out.append(value[i])
+            i += 1
+            continue
+        out.append(_register_math(command + first[0] + second[0]))
+        i = second[1]
+    value = "".join(out)
+
+    token = "\\sqrt{"
+    out = []
+    i = 0
+    while True:
+        j = value.find(token, i)
+        if j < 0:
+            out.append(value[i:])
+            break
+        out.append(value[i:j])
+        depth = 0
+        k = j + len(token) - 1  # position of the opening brace
+        start = k + 1
+        while k < len(value):
+            ch = value[k]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            k += 1
+        if k >= len(value):  # unbalanced braces: keep the remainder literal
+            out.append(value[j:])
+            break
+        out.append(_register_math(f"\\sqrt{{{value[start:k]}}}"))
+        i = k + 1
+    return "".join(out)
+
+
+_FRAC_STYLE_COMMANDS = ("\\dfrac", "\\tfrac", "\\frac", "\\binom")
+_ONE_ARG_MATH_COMMANDS = ("\\sqrt", "\\vec")
+_CJK_MATH_PUNCT = str.maketrans("，；：（）．", ",;:().")
+_STANDALONE_LINE_L = re.compile(r"(?<![A-Za-z\\])l(?![A-Za-z])")
+_PROTECTED_TEXT_COMMAND = re.compile(
+    r"\\(?:text|mathrm|operatorname)\{[^{}]*\}"
+)
+
+
+def _read_math_token(latex: str, index: int) -> tuple[str, int] | None:
+    """Read one argument token at *index*; bare tokens are returned braced."""
+    n = len(latex)
+    while index < n and latex[index] in " \t":
+        index += 1
+    if index >= n:
+        return None
+    if latex[index] == "{":
+        depth = 0
+        k = index
+        while k < n:
+            if latex[k] == "{":
+                depth += 1
+            elif latex[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    return latex[index:k + 1], k + 1
+            k += 1
+        return None  # unbalanced braces: let the caller keep the source literal
+    if latex[index] == "\\":
+        k = index + 1
+        while k < n and latex[k].isalpha():
+            k += 1
+        if k == index + 1:
+            return None
+        return "{" + latex[index:k] + "}", k
+    return "{" + latex[index] + "}", index + 1
+
+
+def _normalize_math_args(latex: str) -> str:
+    """Brace bare single-token arguments so mathtext accepts TeX shorthand.
+
+    Bank content carries real-LaTeX shorthand such as ``\\frac12``,
+    ``\\frac{\\sqrt{10}}5``, ``\\sqrt3`` or ``\\vec a``: valid in TeX (single
+    tokens need no braces) but rejected by matplotlib mathtext, which used to
+    push those segments into the plain-text fallback (e.g. ``e=frac√105``).
+    Normalizing keeps every such segment image-rendered. ``\\sqrt[n]{...}`` is
+    left untouched because mathtext does not support it at all.
+    """
+    commands = _FRAC_STYLE_COMMANDS + _ONE_ARG_MATH_COMMANDS
+    out: list[str] = []
+    i = 0
+    n = len(latex)
+    while i < n:
+        if latex[i] != "\\":
+            out.append(latex[i])
+            i += 1
+            continue
+        command = next((c for c in commands if latex.startswith(c, i)), None)
+        if command is None:
+            out.append(latex[i])
+            i += 1
+            continue
+        after = i + len(command)
+        if after < n and latex[after].isalpha():  # a longer command name
+            out.append(latex[i])
+            i += 1
+            continue
+        if command == "\\sqrt":
+            probe = after
+            while probe < n and latex[probe] in " \t":
+                probe += 1
+            if probe < n and latex[probe] == "[":
+                out.append(latex[i])
+                i += 1
+                continue
+        arity = 2 if command in _FRAC_STYLE_COMMANDS else 1
+        args: list[str] = []
+        j = after
+        ok = True
+        for _ in range(arity):
+            token = _read_math_token(latex, j)
+            if token is None:
+                ok = False
+                break
+            argument = token[0]
+            if argument.startswith("{") and argument.endswith("}"):
+                argument = "{" + _normalize_math_args(argument[1:-1]) + "}"
+            args.append(argument)
+            j = token[1]
+        if not ok:
+            out.append(latex[i])
+            i += 1
+            continue
+        out.append(command + "".join(args))
+        i = j
+    return "".join(out)
+
+
+_SLASH_FRACTION_BOUNDARIES = frozenset("+-=<>:,;|&")
+
+
+def _slash_operand_span(latex: str, slash: int, *, reverse: bool) -> tuple[int, int] | None:
+    """Return the adjacent balanced operand on one side of a slash."""
+    if reverse:
+        index = slash - 1
+        while index >= 0 and latex[index] in " \t":
+            index -= 1
+        end = index + 1
+        depths = {"}": 0, ")": 0, "]": 0}
+        opening_to_closing = {"{": "}", "(": ")", "[": "]"}
+        while index >= 0:
+            char = latex[index]
+            if char in depths:
+                depths[char] += 1
+            elif char in opening_to_closing:
+                closing = opening_to_closing[char]
+                if depths[closing] == 0:
+                    break
+                depths[closing] -= 1
+            elif not any(depths.values()) and (
+                char.isspace() or char == "/" or char in _SLASH_FRACTION_BOUNDARIES
+            ):
+                break
+            index -= 1
+        start = index + 1
+        return (start, end) if start < end else None
+
+    index = slash + 1
+    while index < len(latex) and latex[index] in " \t":
+        index += 1
+    start = index
+    depths = {"{": 0, "(": 0, "[": 0}
+    closing_to_opening = {"}": "{", ")": "(", "]": "["}
+    while index < len(latex):
+        char = latex[index]
+        if char in depths:
+            depths[char] += 1
+        elif char in closing_to_opening:
+            opening = closing_to_opening[char]
+            if depths[opening] == 0:
+                break
+            depths[opening] -= 1
+        elif not any(depths.values()) and (
+            char.isspace() or char == "/" or char in _SLASH_FRACTION_BOUNDARIES
+        ):
+            break
+        index += 1
+    return (start, index) if start < index else None
+
+
+def _normalize_slash_fractions(latex: str) -> str:
+    r"""Convert conservative inline ``a/b`` forms to stacked ``\frac`` forms.
+
+    Imported PDF text often preserves a mathematical fraction only as a slash,
+    for example ``x^2/a^2`` or ``\sqrt{3}a/12``.  Conversion happens only in
+    already-extracted math segments and stops at top-level operators, spaces and
+    punctuation. Text-bearing commands are protected so units such as
+    ``\mathrm{m/s}`` keep their literal slash.
+    """
+    protected: list[str] = []
+
+    def _protect(match: "re.Match[str]") -> str:
+        token = f"ZZPROTECTEDFRACTION{len(protected):04d}ZZ"
+        protected.append(match.group(0))
+        return token
+
+    value = _PROTECTED_TEXT_COMMAND.sub(_protect, latex)
+    search_from = 0
+    while True:
+        slash = value.find("/", search_from)
+        if slash < 0:
+            break
+        left = _slash_operand_span(value, slash, reverse=True)
+        right = _slash_operand_span(value, slash, reverse=False)
+        if left is None or right is None:
+            search_from = slash + 1
+            continue
+        start, left_end = left
+        right_start, end = right
+        numerator = value[start:left_end]
+        denominator = value[right_start:end]
+        replacement = rf"\frac{{{numerator}}}{{{denominator}}}"
+        value = value[:start] + replacement + value[end:]
+        search_from = start + len(replacement)
+
+    for index, original in enumerate(protected):
+        value = value.replace(f"ZZPROTECTEDFRACTION{index:04d}ZZ", original)
+    return value
+
+
+def _normalize_line_symbol(latex: str) -> str:
+    r"""Render a standalone line variable ``l`` as the unambiguous ``\ell``.
+
+    The default math italic lowercase ``l`` resembles a slash in the PDF font.
+    Only independent math identifiers are replaced; command names and explicit
+    text/roman groups such as ``\lim`` and ``\mathrm{l}`` remain untouched.
+    """
+    protected: list[str] = []
+
+    def _protect(match: "re.Match[str]") -> str:
+        token = f"ZZPROTECTED{len(protected):04d}ZZ"
+        protected.append(match.group(0))
+        return token
+
+    value = _PROTECTED_TEXT_COMMAND.sub(_protect, latex)
+    value = _STANDALONE_LINE_L.sub(r"\\ell", value)
+    for index, original in enumerate(protected):
+        value = value.replace(f"ZZPROTECTED{index:04d}ZZ", original)
+    return value
+
+
+def _normalize_render_latex(latex: str) -> str:
+    """Return the canonical LaTeX string consumed by the PDF renderer."""
+    value = _normalize_math_args(latex)
+    value = _normalize_slash_fractions(value)
+    return _normalize_line_symbol(value)
+
+
+def _render_math_image(latex: str, font_size: float) -> tuple[str, float, float]:
+    """Render one math segment with matplotlib mathtext; return (url, w_pt, h_pt)."""
+    import matplotlib
+    latex = _normalize_render_latex(latex)
+    key = hashlib.sha256(
+        f"{MATH_CACHE_VERSION}|{matplotlib.__version__}|{latex}|{font_size:.2f}".encode("utf-8")
+    ).hexdigest()[:16]
+    MATH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    out = MATH_CACHE_DIR / f"math-{key}.png"
+    if not out.is_file():
+        matplotlib.use("Agg")
+        from matplotlib import pyplot as plt
+        fig = plt.figure(figsize=(0.01, 0.01))
+        fig.text(0, 0, "$" + latex + "$", fontsize=font_size)
+        fig.savefig(out, dpi=360, bbox_inches="tight", pad_inches=0.012, transparent=True)
+        plt.close(fig)
+    from PIL import Image
+    with Image.open(out) as im:
+        w_px, h_px = im.size
+    url = out.resolve().as_posix()
+    return url, w_px * 72.0 / 360.0, h_px * 72.0 / 360.0
+
+
+def _math_img_tag(placeholder: str, font_size: float) -> str:
+    registered = _MATH_REGISTRY.get(placeholder)
+    if registered is None:
+        return placeholder
+    latex, display = registered
+    # 数学段内的全角标点（多为题干排版带入的 ，；（）：．）转成半角后即可
+    # 正常图片渲染，避免整段因一个全角逗号退回 "(√2)/(2)" 式文本。
+    latex = latex.translate(_CJK_MATH_PUNCT)
+    # Segments mathtext cannot handle (CJK text, unsupported constructs) fall
+    # back to the plain-text conversion for that segment only.
+    if _HAS_CJK.search(latex):
+        return html.escape(_latex_to_text(latex))
+    try:
+        url, w_pt, h_pt = _render_math_image(latex, font_size)
+    except Exception:
+        return html.escape(_latex_to_text(latex))
+    max_w = 455.0 if display else 435.0
+    max_h = font_size * (2.15 if display else 1.45)
+    scale = min(1.0, max_w / w_pt, max_h / h_pt)
+    w_pt, h_pt = w_pt * scale, h_pt * scale
+    valign = -(font_size * 0.18)
+    tag = (
+        f'<img src="{url}" width="{w_pt:.1f}" height="{h_pt:.1f}" '
+        f'valign="{valign:.1f}"/>'
+    )
+    return f"<br/>{tag}<br/>" if display else tag
+
+
+def clean_math(text: str | None) -> str:
+    return _latex_to_text(_extract_math(text or "")).replace("ZZLITERALDOLLARZZ", "$")
+
+
+def _latex_to_text(value: str) -> str:
+    value = re.sub(r"!\[[^\]]*\]\([^)]*\)", "[题图见原题]", value)
+    value = _normalize_math_args(value)
+    value = value.replace("\\left", "").replace("\\right", "")
+    value = re.sub(r"\^\{2\}", "²", value)
+    value = re.sub(r"\^\{3\}", "³", value)
+    value = re.sub(r"\^\{([^{}]+)\}", r"^(\1)", value)
+    value = re.sub(r"_\{([^{}]+)\}", r"_(\1)", value)
+    value = re.sub(r"\\overrightarrow\{([^{}]+)\}", r"vec(\1)", value)
+    value = re.sub(r"\\vec\{([^{}]+)\}", r"vec(\1)", value)
+    value = re.sub(r"\\(?:text|mathrm|operatorname)\{([^{}]+)\}", r"\1", value)
+    value = re.sub(r"\\frac\s*([0-9A-Za-z])\s*([0-9A-Za-z])", r"(\1)/(\2)", value)
+
+    def _fmt_sqrt(match: "re.Match[str]") -> str:
+        inner = match.group(1)
+        # 书面通用格式：纯数字/字母的简单被开方数不带括号（√41、√2）；
+        # 复合被开方数保留括号标示根号覆盖范围（√(x+1)）。
+        if re.fullmatch(r"[0-9A-Za-z]+", inner):
+            return "√" + inner
+        return "√(" + inner + ")"
+
+    for _ in range(8):
+        before = value
+        value = re.sub(r"\\sqrt\{([^{}]+)\}", _fmt_sqrt, value)
+        value = re.sub(r"\\frac\{([^{}]+)\}\{([^{}]+)\}", r"(\1)/(\2)", value)
+        if value == before:
+            break
+    replacements = {
+        "\\le": "≤", "\\ge": "≥", "\\ne": "≠", "\\perp": "⊥",
+        "\\ell": "ℓ",
+        "\\parallel": "∥", "\\pi": "π", "\\infty": "∞",
+        "\\cdot": "·", "\\times": "×", "\\pm": "±",
+        "\\angle": "∠", "\\triangle": "△", "\\therefore": "∴",
+        "\\because": "∵", "\\in": "∈", "\\notin": "∉",
+        "\\subseteq": "⊆", "\\cup": "∪", "\\cap": "∩",
+        "\\Rightarrow": "⇒", "\\Leftarrow": "⇐", "\\Leftrightarrow": "⇔",
+        "\\rightarrow": "→", "\\leftarrow": "←",
+        "\\begin{aligned}": "", "\\end{aligned}": "",
+        "\\begin{cases}": "", "\\end{cases}": "",
+        "\\quad": "  ", "\\;": " ", "\\,": " ",
+    }
+    for old, new in replacements.items():
+        value = value.replace(old, new)
+    value = value.replace("\\\\", "\n")
+    value = re.sub(r"\\(sin|cos|tan|cot|log|ln|max|min)\b", r"\1", value)
+    value = re.sub(r"\\([A-Za-z]+)", r"\1", value)
+    value = value.replace("$", "").replace("`", "").replace("{", "").replace("}", "")
+    value = value.replace("^2", "²").replace("^3", "³")
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
+
+
+_STEM_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]*)\)")
+
+
+def split_stem_images(text: str | None) -> tuple[str, list[str]]:
+    """Strip embedded ``![..](path)`` refs; return (text_without_refs, [paths]).
+
+    ``_latex_to_text`` would otherwise replace them with the "[题图见原题]"
+    placeholder, which leaves students without the diagram. The caller renders
+    the referenced images as block figures right after the paragraph instead.
+    """
+    paths: list[str] = []
+
+    def _sub(match: "re.Match[str]") -> str:
+        paths.append(match.group(1).strip())
+        return ""
+
+    cleaned = _STEM_IMAGE_RE.sub(_sub, text or "")
+    return cleaned, paths
+
+
+def prepare_diagram_image(
+    path: Path,
+    temp_dir: Path,
+    max_width_pt: float,
+    max_height_pt: float,
+) -> tuple[Path, float, float] | None:
+    """Crop empty margins and return a DPI-aware, never-upscaled diagram size."""
+    if not path.is_file():
+        return None
+    try:
+        from PIL import Image, ImageChops
+
+        with Image.open(path) as source:
+            source.load()
+            dpi_info = source.info.get("dpi", (144.0, 144.0))
+            if not isinstance(dpi_info, (tuple, list)) or len(dpi_info) < 2:
+                dpi_info = (144.0, 144.0)
+            dpi_x, dpi_y = float(dpi_info[0]), float(dpi_info[1])
+            if not 60.0 <= dpi_x <= 600.0:
+                dpi_x = 144.0
+            if not 60.0 <= dpi_y <= 600.0:
+                dpi_y = 144.0
+
+            rgba = source.convert("RGBA")
+            canvas = Image.new("RGBA", rgba.size, "white")
+            canvas.alpha_composite(rgba)
+            rgb = canvas.convert("RGB")
+            white = Image.new("RGB", rgb.size, "white")
+            mask = ImageChops.difference(rgb, white).convert("L").point(
+                lambda pixel: 255 if pixel > 12 else 0
+            )
+            bbox = mask.getbbox()
+            if bbox:
+                padding = 8
+                left = max(0, bbox[0] - padding)
+                top = max(0, bbox[1] - padding)
+                right = min(rgb.width, bbox[2] + padding)
+                bottom = min(rgb.height, bbox[3] + padding)
+                rgb = rgb.crop((left, top, right, bottom))
+            if rgb.width <= 0 or rgb.height <= 0:
+                return None
+
+            digest = hashlib.sha256(
+                f"{path.resolve()}|{path.stat().st_mtime_ns}|diagram-v2".encode("utf-8")
+            ).hexdigest()[:16]
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            prepared = temp_dir / f"diagram-{digest}.png"
+            rgb.save(prepared, format="PNG", dpi=(dpi_x, dpi_y), optimize=True)
+    except Exception:
+        return None
+
+    natural_width = rgb.width * 72.0 / dpi_x
+    natural_height = rgb.height * 72.0 / dpi_y
+    scale = min(1.0, max_width_pt / natural_width, max_height_pt / natural_height)
+    return prepared, natural_width * scale, natural_height * scale
+
+
+def concise_solution(text: str | None) -> str:
+    value = text or ""
+    if "完整解答" in value:
+        value = value.split("完整解答", 1)[1]
+    return clean_math(value)
+
+
+def truncate_clean_text(text: str | None, limit: int) -> tuple[str, bool]:
+    """Truncate cleaned text without splitting an embedded math placeholder."""
+    value = clean_math(text)
+    if len(value) <= limit:
+        return value, False
+    pieces = re.split(r"(ZZMATH\d+ZZ)", value)
+    output: list[str] = []
+    remaining = limit
+    for piece in pieces:
+        if not piece or remaining <= 0:
+            continue
+        if re.fullmatch(r"ZZMATH\d+ZZ", piece):
+            if len(piece) > remaining:
+                break
+            output.append(piece)
+            remaining -= len(piece)
+        else:
+            output.append(piece[:remaining])
+            remaining -= min(len(piece), remaining)
+    return "".join(output).rstrip(), True
+
+
+def paragraph_text(text: str | None, font_size: float = 11.0) -> str:
+    escaped = html.escape(clean_math(text)).replace("\n", "<br/>")
+    return re.sub(
+        r"ZZMATH\d+ZZ",
+        lambda match: _math_img_tag(match.group(0), font_size),
+        escaped,
+    )
+
+
+def find_soffice() -> Path | None:
+    candidates = (
+        Path(r"C:\Program Files\LibreOffice\program\soffice.exe"),
+        Path(r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"),
+    )
+    return next((item for item in candidates if item.is_file()), None)
+
+
+def print_pdf(pdf: Path, printer: str | None) -> None:
+    soffice = find_soffice()
+    if not soffice:
+        raise RuntimeError("LibreOffice was not found; PDF was created but not printed")
+    command = [str(soffice), "--headless"]
+    command.extend(["--pt", printer] if printer else ["-p"])
+    command.append(str(pdf.resolve()))
+    subprocess.run(command, check=True, timeout=60)
+
+
+def identifier_label(question_id: str) -> str:
+    return "错题编号" if question_id.startswith("ERR-") else "题库编号"
+
+
+def daily_group_heading(row: dict[str, Any]) -> str:
+    """Fixed daily-review group heading: one main number per saved error."""
+    return f"{row['rank']}　错题编号 {row['daily_error_id']}"
+
+
+def daily_recommendation_heading(row: dict[str, Any]) -> str:
+    """Fixed nested heading; recommendations never consume a main number."""
+    return (
+        f"同类型推荐题 {row['daily_recommendation_index']}　题库编号 "
+        f"{row['question_id']}（难度 {row['difficulty']}/5）"
+    )
+
+
+def create_pdf(
+    output: Path,
+    error_id: str,
+    error: sqlite3.Row,
+    items: list[sqlite3.Row],
+    solution_chars: int,
+    include_answers: bool = False,
+    knowledge_names: list[str] | None = None,
+    project_name: str = DEFAULT_PROJECT_NAME,
+    exam_meta: dict[str, Any] | None = None,
+) -> None:
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.platypus import CondPageBreak, HRFlowable, Image as RLImage, PageBreak, Paragraph, SimpleDocTemplate, Spacer
+
+    regular = Path(r"C:\Windows\Fonts\msyh.ttc")
+    bold = Path(r"C:\Windows\Fonts\msyhbd.ttc")
+    try:
+        pdfmetrics.registerFont(TTFont("PracticeCN", str(regular), subfontIndex=0))
+        pdfmetrics.registerFont(TTFont("PracticeCN-Bold", str(bold), subfontIndex=0))
+        font, font_bold = "PracticeCN", "PracticeCN-Bold"
+    except Exception:
+        pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+        font = font_bold = "STSong-Light"
+
+    styles = getSampleStyleSheet()
+    title = ParagraphStyle(
+        "title-cn", parent=styles["Title"], fontName=font_bold, fontSize=18,
+        leading=24, alignment=TA_CENTER, textColor=colors.HexColor("#173B57"),
+        spaceAfter=7 * mm,
+    )
+    heading = ParagraphStyle(
+        "heading-cn", parent=styles["Heading2"], fontName=font_bold, fontSize=13,
+        leading=19, textColor=colors.HexColor("#175CD3"), spaceBefore=4 * mm,
+        spaceAfter=2 * mm,
+    )
+    body = ParagraphStyle(
+        "body-cn", parent=styles["Normal"], fontName=font, fontSize=11,
+        leading=22, textColor=colors.HexColor("#101828"), spaceAfter=3 * mm,
+    )
+    meta = ParagraphStyle(
+        "meta-cn", parent=body, fontSize=8.5, leading=15,
+        textColor=colors.HexColor("#667085"), spaceAfter=4 * mm,
+    )
+
+    def footer(canvas, doc):
+        canvas.saveState()
+        canvas.setFont(font, 8)
+        canvas.setFillColor(colors.HexColor("#667085"))
+        footer_label = exam_meta["title"] if exam_meta else f"{project_name} · {error_id}"
+        canvas.drawString(18 * mm, 12 * mm, footer_label)
+        canvas.drawRightString(192 * mm, 12 * mm, f"第 {doc.page} 页")
+        canvas.restoreState()
+
+    # 题图：裁掉空白边、按 DPI 换算物理尺寸、只缩小不放大。
+    max_img_w = 110 * mm
+    max_img_h = 65 * mm
+    pdf_tmp_root = PROJECT_ROOT / "tmp" / "pdfs"
+    pdf_tmp_root.mkdir(parents=True, exist_ok=True)
+    diagram_temp_dir = Path(tempfile.mkdtemp(prefix="diagrams-", dir=pdf_tmp_root))
+
+    def image_flowable(rel_path: str):
+        path = Path(rel_path)
+        if not path.is_absolute():
+            path = PROJECT_ROOT / rel_path
+        if not path.is_file():
+            return None
+        prepared = prepare_diagram_image(path, diagram_temp_dir, max_img_w, max_img_h)
+        if prepared is None:
+            return None
+        prepared_path, width, height = prepared
+        image = RLImage(str(prepared_path), width=width, height=height)
+        image.hAlign = "CENTER"
+        return image
+
+    def text_flowables(text: str | None, style, font_size: float = 11.0, prefix: str = ""):
+        cleaned, img_paths = split_stem_images(text)
+        flows = [Paragraph(prefix + paragraph_text(cleaned, font_size), style)]
+        for rel in img_paths:
+            flowable = image_flowable(rel)
+            if flowable is None:
+                flows.append(Paragraph("［题图缺失，见原卷］", meta))
+            else:
+                flows.extend([Spacer(1, 2 * mm), flowable, Spacer(1, 3 * mm)])
+        return flows
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    document_title = exam_meta["title"] if exam_meta else f"{project_name} · 针对性练习 {error_id}"
+    doc = SimpleDocTemplate(
+        str(output), pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm,
+        topMargin=17 * mm, bottomMargin=19 * mm,
+        title=document_title, author=project_name,
+    )
+    knowledge_names = knowledge_names or []
+    if exam_meta:
+        subtitle = html.escape(exam_meta.get("subtitle") or "")
+        title_html = html.escape(exam_meta["title"])
+        if subtitle:
+            title_html += f"<br/><font size='11'>{subtitle}</font>"
+        story = [Paragraph(title_html, title)]
+        story.extend([
+            Paragraph(
+                f"考试时间：{exam_meta['duration_minutes']} 分钟　满分：{exam_meta['total_score']} 分",
+                body,
+            ),
+            Paragraph("姓名：____________　班级：____________　得分：____________", body),
+        ])
+        for index, instruction in enumerate(exam_meta.get("instructions") or [], start=1):
+            story.append(Paragraph(f"{index}. {paragraph_text(instruction)}", meta))
+        if knowledge_names:
+            story.append(Paragraph("范围：" + "、".join(html.escape(name) for name in knowledge_names), meta))
+        story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#84ADFF")))
+        current_section = None
+        for row in items:
+            if row["section_index"] != current_section:
+                current_section = row["section_index"]
+                if row["rank"] > 1:
+                    story.append(PageBreak())
+                story.append(Paragraph(html.escape(row["section_title"]), heading))
+                if row["section_instruction"]:
+                    story.append(Paragraph(paragraph_text(row["section_instruction"]), body))
+            elif row["rank"] > 1:
+                min_start_space = row.get("min_start_space_mm") or 55
+                story.append(CondPageBreak(min_start_space * mm))
+            story.append(Paragraph(f"{row['rank']}．（{row['score']} 分）", heading))
+            story.extend(text_flowables(row["stem"], body))
+            if row["options_json"]:
+                options = json.loads(row["options_json"])
+                story.append(Paragraph("<br/>".join(paragraph_text(item) for item in options), body))
+            if exam_meta.get("show_provenance", True):
+                story.append(Paragraph(
+                    f"题源：{paragraph_text(row['source_name'], 8.5)}　选题理由：{paragraph_text(row['reason'], 8.5)}",
+                    meta,
+                ))
+            answer_space = row["answer_space_mm"]
+            if answer_space <= 0:
+                answer_space = 7 if row["options_json"] else (45 if "解答" in str(row["question_type"]) else 14)
+            story.append(Spacer(1, answer_space * mm))
+    else:
+        info_bits: list[str] = []
+        if knowledge_names:
+            info_bits.append("知识点：" + "、".join(html.escape(name) for name in knowledge_names))
+        cause_label = _cause_name(error["cause_code"])
+        if cause_label:
+            info_bits.append(f"错因：{html.escape(cause_label)}")
+        story = [Paragraph(f"{html.escape(project_name)}<br/><font size='11'>错因针对性练习</font>", title)]
+        story.extend(text_flowables(error["problem_text"], body, prefix="<b>错题原题：</b>"))
+        story.extend([
+            Paragraph("　　".join(info_bits) if info_bits else "知识点：—", body),
+            Paragraph(
+                "姓名：____________　日期：____________　先独立完成，全部做完后拍照发给我判。",
+                body,
+            ),
+            HRFlowable(width="100%", thickness=1, color=colors.HexColor("#84ADFF")),
+        ])
+        for row in items:
+            if isinstance(row, dict) and "daily_group_start" in row:
+                if row["daily_group_start"]:
+                    if row["rank"] > 1:
+                        story.append(CondPageBreak(80 * mm))
+                    story.append(
+                        Paragraph(
+                            daily_group_heading(row),
+                            heading,
+                        )
+                    )
+                    story.extend(
+                        text_flowables(
+                            row["daily_problem_text"], body, prefix="<b>错题回顾：</b>"
+                        )
+                    )
+                else:
+                    story.append(CondPageBreak(55 * mm))
+                recommendation_index = row["daily_recommendation_index"]
+                if recommendation_index:
+                    story.append(
+                        Paragraph(
+                            daily_recommendation_heading(row),
+                            heading,
+                        )
+                    )
+                    story.extend(text_flowables(row["stem"], body))
+                    if row["options_json"]:
+                        options = json.loads(row["options_json"])
+                        story.append(
+                            Paragraph(
+                                "<br/>".join(paragraph_text(item) for item in options), body
+                            )
+                        )
+                story.extend([
+                    Paragraph(
+                        f"推荐理由：{paragraph_text(row['reason'], 8.5)}<br/>"
+                        f"来源：{paragraph_text(row['source_name'], 8.5)}",
+                        meta,
+                    ),
+                    Spacer(1, 22 * mm),
+                ])
+                continue
+            if row["rank"] > 1:
+                story.append(CondPageBreak(80 * mm))
+            story.append(
+                Paragraph(
+                    f"{row['rank']}　{identifier_label(str(row['question_id']))} "
+                    f"{row['question_id']}（难度 {row['difficulty']}/5）",
+                    heading,
+                )
+            )
+            story.extend(text_flowables(row["stem"], body))
+            if row["options_json"]:
+                options = json.loads(row["options_json"])
+                story.append(Paragraph("<br/>".join(paragraph_text(item) for item in options), body))
+            story.extend([
+                Paragraph(f"推荐理由：{paragraph_text(row['reason'], 8.5)}<br/>来源：{paragraph_text(row['source_name'], 8.5)}", meta),
+                Spacer(1, 22 * mm),
+            ])
+
+    if include_answers:
+        story.extend([PageBreak(), Paragraph("答案与解析", title)])
+        for row in items:
+            is_daily_row = isinstance(row, dict) and "daily_group_start" in row
+            if is_daily_row and row["daily_group_start"]:
+                if row["rank"] > 1:
+                    story.append(CondPageBreak(100 * mm))
+                story.append(
+                    Paragraph(daily_group_heading(row), heading)
+                )
+            elif not is_daily_row and row["rank"] > 1:
+                story.append(CondPageBreak(100 * mm))
+            solution_stripped, solution_images = split_stem_images(row["solution"])
+            solution, truncated = truncate_clean_text(solution_stripped, solution_chars)
+            if truncated:
+                solution += "……（完整解析保存在题库中）"
+            answer_heading = (
+                f"同类型推荐题 {row['daily_recommendation_index']}　{row['question_id']}"
+                if is_daily_row and row["daily_recommendation_index"]
+                else ("错题原题" if is_daily_row else f"{row['rank']}　{row['question_id']}")
+            )
+            story.extend([
+                Paragraph(answer_heading, heading),
+                Paragraph(f"<b>答案：</b>{paragraph_text(row['answer'])}", body),
+                Paragraph(paragraph_text(solution) or "题库暂无解析。", body),
+            ])
+            for rel in solution_images:
+                flowable = image_flowable(rel)
+                story.append(flowable if flowable is not None else Paragraph("［题图缺失，见原卷］", meta))
+
+    try:
+        doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    finally:
+        shutil.rmtree(diagram_temp_dir, ignore_errors=True)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate an A4 practice sheet or exam")
+    parser.add_argument("error_id", nargs="?")
+    parser.add_argument("--daily-packet", type=Path)
+    parser.add_argument("--exam-packet", type=Path)
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--print", dest="do_print", action="store_true")
+    parser.add_argument("--printer")
+    parser.add_argument("--solution-chars", type=int, default=1200)
+    parser.add_argument(
+        "--with-answers",
+        dest="with_answers",
+        action="store_true",
+        help="生成的 PDF 附答案页（默认不附答案：孩子做完后拍照判题）",
+    )
+    args = parser.parse_args()
+    if sum(bool(item) for item in (args.error_id, args.daily_packet, args.exam_packet)) != 1:
+        parser.error("provide exactly one error_id, --daily-packet, or --exam-packet")
+    return args
+
+
+def main() -> int:
+    args = parse_args()
+    ensure_pdf_runtime()
+    config = load_config(args.config)
+    if args.daily_packet:
+        error, items, knowledge_names, packet_date = load_daily_packet(args.db, args.daily_packet)
+        document_id = f"daily-review-{packet_date}"
+        exam_meta = None
+    elif args.exam_packet:
+        exam_meta, items, knowledge_names, document_id = load_exam_packet(args.db, args.exam_packet)
+        error = {"problem_text": "", "cause_code": None}
+    else:
+        error, items, knowledge_names = load_items(args.db, args.error_id)
+        document_id = args.error_id
+        exam_meta = None
+    default_suffix = "exam" if exam_meta else "practice"
+    output = args.output or (PROJECT_ROOT / "output" / "pdf" / f"{document_id}-{default_suffix}.pdf")
+    # 默认不附答案页（孩子做完后拍照判题）；--with-answers 或配置项可显式打开。
+    include_answers = bool(args.with_answers or config.get("answers_after_questions", False))
+    project_name = str(config.get("project_name") or DEFAULT_PROJECT_NAME).strip()
+    create_pdf(
+        output, document_id, error, items, max(300, args.solution_chars),
+        include_answers=include_answers,
+        knowledge_names=knowledge_names,
+        project_name=project_name,
+        exam_meta=exam_meta,
+    )
+    printer = args.printer or config.get("printer_name")
+    if args.do_print:
+        if include_answers:
+            # PDF 附答案页时，打印只打题目页：生成临时纯题目版送打印机后删除。
+            questions_only = output.with_name(output.stem + "-questions-only.pdf")
+            create_pdf(
+                questions_only, document_id, error, items, max(300, args.solution_chars),
+                include_answers=False,
+                knowledge_names=knowledge_names,
+                project_name=project_name,
+                exam_meta=exam_meta,
+            )
+            try:
+                print_pdf(questions_only, printer)
+            finally:
+                questions_only.unlink(missing_ok=True)
+        else:
+            print_pdf(output, printer)
+    print(json.dumps({
+        "pdf": str(output.resolve()),
+        "questions": len(items),
+        "document_type": "exam" if exam_meta else "practice",
+        "with_answers": include_answers,
+        "printed": bool(args.do_print),
+        "print_scope": ("questions-only" if include_answers else "all") if args.do_print else None,
+        "printer": printer if args.do_print else None,
+    }, ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

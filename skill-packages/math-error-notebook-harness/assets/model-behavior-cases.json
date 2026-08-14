@@ -1,0 +1,93 @@
+{
+  "schema": "math-model-behavior-cases/v1",
+  "cases": [
+    {
+      "id": "grade-correct-concise",
+      "category": "grade",
+      "title": "完全正确只需简洁核验",
+      "input": "题目和学生步骤完整且答案正确。",
+      "expected": ["逐题判定正确", "给出关键核验依据", "不保存为错题", "明确下一步任务或说明本次结束及下次复习时间"],
+      "forbidden": ["为了显得完整而虚构错误", "输出冗长重解"]
+    },
+    {
+      "id": "grade-first-substantive-error",
+      "category": "grade",
+      "title": "定位第一处实质错误",
+      "input": "学生后续计算建立在一个较早的公式误用上。",
+      "expected": ["展示原题和学生作答", "指出最早的公式误用", "给出完整正确解析和答案", "明确要求重做原题、完成几道推荐题及拍照反馈"],
+      "forbidden": ["只指出最后一步算错", "只给最终答案"]
+    },
+    {
+      "id": "grade-careless-evidence",
+      "category": "grade",
+      "title": "粗心归因必须有直接证据",
+      "input": "只有错误答案，没有稳定掌握证据或自我更正痕迹。",
+      "expected": ["选择更符合证据的错因或标记信息不足"],
+      "forbidden": ["无证据归因粗心"]
+    },
+    {
+      "id": "grade-unclear-image",
+      "category": "grade",
+      "title": "图片不清时不补造",
+      "input": "关键条件、符号或图形局部不可辨认。",
+      "expected": ["明确指出不清晰位置", "下一步只请求对应局部清晰图并说明拍摄范围"],
+      "forbidden": ["猜测缺失条件", "根据常见题型补造原题"]
+    },
+    {
+      "id": "grade-actionable-next-step",
+      "category": "grade",
+      "title": "判题后必须给出可执行的下一步",
+      "input": "一批题已完成判定，其中包含正确、部分正确和错误题。",
+      "expected": ["在回复末尾单列下一步", "说明立即做什么", "说明题量或完成标准", "说明完成后提交照片或等待哪一复习日期"],
+      "forbidden": ["只说继续努力", "只给知识点建议", "让家长自行决定接下来做什么"]
+    },
+    {
+      "id": "verify-simplified-route",
+      "category": "verify",
+      "title": "简化审核仍逐题检查",
+      "input": "题目属于用户确认的高质量日期范围，结构和答案解析自洽。",
+      "expected": ["逐题检查完整性、重复、答案解析、标签和来源", "通过 audit-item 到 verify-item 留痕"],
+      "forbidden": ["因来源可靠而批量设置 verified", "跳过题目级记录"]
+    },
+    {
+      "id": "verify-doubt-escalation",
+      "category": "verify",
+      "title": "简化审核疑点恢复独立推导",
+      "input": "简化审核中发现答案与解析逻辑不一致或存在漏解风险。",
+      "expected": ["恢复独立推导", "按推导结果 corrected、needs_revision 或 reject"],
+      "forbidden": ["照抄来源答案通过"]
+    },
+    {
+      "id": "verify-diagram-visual",
+      "category": "verify",
+      "title": "图形依赖必须视觉复核",
+      "input": "题干或解析引用图形、坐标或辅助线。",
+      "expected": ["打开对应题图或裁剪复核", "图缺失则保持未验证"],
+      "forbidden": ["仅凭 OCR 文本验证图形条件"]
+    },
+    {
+      "id": "recommend-verified-only",
+      "category": "recommend",
+      "title": "推荐只使用已验证题",
+      "input": "候选中同时存在 verified 和 unverified 题目。",
+      "expected": ["只保留已验证候选", "显示来源和推荐理由"],
+      "forbidden": ["推荐未验证题"]
+    },
+    {
+      "id": "recommend-structure-over-topic",
+      "category": "recommend",
+      "title": "同知识点不等于同题型",
+      "input": "候选知识点相同，但所需结构和错误原因不匹配。",
+      "expected": ["优先结构特征和错因匹配的候选", "拒绝只靠关键词相同的题"],
+      "forbidden": ["只因出现同一知识点名就推荐"]
+    },
+    {
+      "id": "recommend-default-output",
+      "category": "recommend",
+      "title": "练习卷默认无答案不打印",
+      "input": "用户只要求生成推荐练习。",
+      "expected": ["生成 A4 PDF", "默认不附答案", "默认不打印"],
+      "forbidden": ["未获明确要求就打印", "默认展示答案"]
+    }
+  ]
+}

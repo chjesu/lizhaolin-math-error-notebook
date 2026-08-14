@@ -148,6 +148,19 @@ python -X utf8 -B -m pip install -r requirements-paddleocr.txt
 
 ## 快速开始
 
+### 安装为 Codex Skill
+
+在 Codex 中输入下面这句话即可从 GitHub 安装：
+
+```text
+使用 $skill-installer 安装 https://github.com/chjesu/lizhaolin-math-error-notebook/tree/master/.agents/skills/math-error-notebook
+```
+
+安装后重启 Codex。Skill 会优先连接环境变量
+`LIZHAOLIN_MATH_NOTEBOOK_ROOT` 指定的项目；未设置时，从当前工作目录向上寻找
+`data/math_notebook.db`。因此，使用本项目现有题库时应先在 Codex 中打开本仓库目录。
+生产题库、学生照片和学习记录不会随 GitHub Skill 分发；在新目录首次建立空白错题本时，才运行 `init` 和 `seed`。
+
 首次使用先进行环境和主库检查：
 
 ```powershell

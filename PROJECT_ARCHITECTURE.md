@@ -140,6 +140,9 @@ flowchart TD
 
 新智能体不得创建第二套数据库访问层、推荐器、PDF生成器或验证器。可复用功能应扩展权威入口，并补充 `tests/test_notebook.py`。
 
+Skill 可从 GitHub 的 `.agents/skills/math-error-notebook` 子目录安装。安装版按
+`LIZHAOLIN_MATH_NOTEBOOK_ROOT`、当前目录向上的主库/项目标记、当前目录的顺序绑定项目；绑定后仍只使用该项目的 `data/math_notebook.db`，不会跨磁盘发现题库。
+
 ## 5. `notebook.py` 全部 CLI 功能
 
 所有命令默认使用唯一主库。`--json` 返回精简 JSON；仅在确有需要时使用 `--full` 或 `--pretty-json`。
@@ -340,8 +343,11 @@ math-error-notebook/
 ├─ .codex/rules.md                    旧版 Codex 兼容提示；不替代 AGENTS.md
 ├─ .agents/skills/math-error-notebook/
 │  ├─ SKILL.md                       智能体工作流
+│  ├─ agents/openai.yaml             Codex Skill 列表元数据
 │  ├─ scripts/notebook.py            唯一业务/数据库入口
+│  ├─ scripts/math_notebook_project_paths.py  项目级/已安装 Skill 的根目录解析器
 │  ├─ scripts/practice_sheet.py      PDF与打印入口
+│  ├─ scripts/requirements-pdf.txt   安装版 PDF 固定依赖
 │  ├─ assets/                        JSON模板、代码表、种子题
 │  └─ references/                    按需读取的详细规范
 ├─ data/

@@ -29,8 +29,13 @@ from typing import Any, Callable, Iterable
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from math_notebook_project_paths import resolve_project_root
+
 SKILL_DIR = SCRIPT_DIR.parent
-PROJECT_ROOT = SKILL_DIR.parents[2]
+PROJECT_ROOT = resolve_project_root(SKILL_DIR)
 OCR_RUNTIME = PROJECT_ROOT / ".runtime" / "ocr"
 OCR_REQUIREMENTS = PROJECT_ROOT / "requirements-ocr.txt"
 PADDLE_WORKER = SCRIPT_DIR / "paddle_formula_worker.py"

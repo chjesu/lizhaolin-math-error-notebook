@@ -20,13 +20,20 @@ from typing import Any
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from math_notebook_project_paths import resolve_project_root
+
 SKILL_DIR = SCRIPT_DIR.parent
-PROJECT_ROOT = SKILL_DIR.parents[2]
+PROJECT_ROOT = resolve_project_root(SKILL_DIR)
 DEFAULT_DB = PROJECT_ROOT / "data" / "math_notebook.db"
 DEFAULT_CONFIG = PROJECT_ROOT / "config" / "math-error-notebook.json"
 DEFAULT_PROJECT_NAME = "李兆霖数学错题本"
 LOCAL_PDF_RUNTIME = PROJECT_ROOT / "runtime" / "pdf"
 PDF_REQUIREMENTS = PROJECT_ROOT / "requirements-pdf.txt"
+if not PDF_REQUIREMENTS.is_file():
+    PDF_REQUIREMENTS = SCRIPT_DIR / "requirements-pdf.txt"
 MPL_CONFIG_DIR = PROJECT_ROOT / "tmp" / "pdfs" / "matplotlib"
 BUNDLED_PYTHON = (
     Path.home() / ".cache" / "codex-runtimes" / "codex-primary-runtime"

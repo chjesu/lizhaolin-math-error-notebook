@@ -7,6 +7,7 @@ description: Manage a Chinese high-school math error notebook backed by one loca
 
 ## Fast path
 
+- An installed copy binds to `LIZHAOLIN_MATH_NOTEBOOK_ROOT` when set; otherwise it uses the nearest parent containing `data/math_notebook.db` or a project-local copy of this Skill. If neither exists, it uses the current directory so `init` can create a new notebook. Never search for another database after binding.
 - On Windows PowerShell, always pass `-Encoding UTF8` to `Get-Content`, and run Python entry points with `-X utf8`; do not guess encodings after mojibake appears.
 - Start routine work with one compact, read-only call: `scripts/notebook.py agent-context --task grade|recommend|verify|import|review|pdf|maintenance --json`. Use `doctor --json` for environment health and `handoff --json` for a compact transfer snapshot.
 - Use image input directly for photos; never claim to switch models/providers. The default preflight only controls image size locally, and the current remote vision-capable model must inspect every returned preview.

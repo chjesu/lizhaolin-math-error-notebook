@@ -21,6 +21,13 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from math_notebook_project_paths import resolve_project_root
+
+
 CAUSE_CODES = {
     "knowledge_gap": "知识点未掌握",
     "concept_confusion": "概念理解不准确",
@@ -65,15 +72,12 @@ FEATURE_CODES = {
 REVIEW_INTERVALS = (1, 2, 4, 7, 15, 30)
 SCHEMA_VERSION = 2
 PROJECT_NAME = "李兆霖数学错题本"
-SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR.parent
 
 
 def default_database_path() -> Path:
-    """Bind a project skill to its project's canonical DB, even from a subdirectory."""
-    if SKILL_DIR.parent.name == "skills" and SKILL_DIR.parent.parent.name == ".agents":
-        return SKILL_DIR.parents[2] / "data" / "math_notebook.db"
-    return Path("data/math_notebook.db")
+    """Bind project-local and installed skills to one canonical project DB."""
+    return resolve_project_root(SKILL_DIR) / "data" / "math_notebook.db"
 
 
 DEFAULT_DB = default_database_path()
@@ -2887,7 +2891,11 @@ def _utf8_project_status(project_root: Path) -> dict[str, Any]:
         project_root / ".gitattributes",
     )
     invalid: list[str] = []
+    missing: list[str] = []
     for path in paths:
+        if not path.is_file():
+            missing.append(str(path.relative_to(project_root)))
+            continue
         try:
             path.read_text(encoding="utf-8-sig")
         except (OSError, UnicodeDecodeError):
@@ -2896,6 +2904,7 @@ def _utf8_project_status(project_root: Path) -> dict[str, Any]:
         "policy": "UTF-8",
         "project_files_valid": not invalid,
         "invalid_files": invalid,
+        "missing_files": missing,
         "powershell_read_command": "Get-Content -Raw -Encoding UTF8 <path>",
         "python_command_prefix": "python -X utf8 -B",
         "python_stdout": getattr(sys.stdout, "encoding", None),
@@ -2931,18 +2940,14 @@ def doctor(
     """Run one deterministic, read-only project startup check."""
     info = bank_info(conn, db_path)
     required = (
-        project_root / "AGENTS.md",
-        project_root / "PROJECT_ARCHITECTURE.md",
-        project_root / ".agents" / "skills" / "math-error-notebook" / "SKILL.md",
-        project_root / ".agents" / "skills" / "math-error-notebook" / "scripts" / "photo_ocr.py",
-        project_root / ".agents" / "skills" / "math-error-notebook" / "scripts" / "paddle_formula_worker.py",
-        project_root / ".agents" / "skills" / "math-error-notebook" / "assets" / "error-analysis-template.json",
-        project_root / ".agents" / "skills" / "math-error-notebook" / "assets" / "question-review-template.json",
-        project_root / ".agents" / "skills" / "math-error-notebook" / "assets" / "model-behavior-cases.json",
-        project_root / "requirements-ocr.txt",
-        project_root / "requirements-paddleocr.txt",
-        project_root / ".editorconfig",
-        project_root / ".gitattributes",
+        SKILL_DIR / "SKILL.md",
+        SKILL_DIR / "scripts" / "photo_ocr.py",
+        SKILL_DIR / "scripts" / "paddle_formula_worker.py",
+        SKILL_DIR / "scripts" / "math_notebook_project_paths.py",
+        SKILL_DIR / "scripts" / "requirements-pdf.txt",
+        SKILL_DIR / "assets" / "error-analysis-template.json",
+        SKILL_DIR / "assets" / "question-review-template.json",
+        SKILL_DIR / "assets" / "model-behavior-cases.json",
     )
     runtime = project_root / "runtime" / "pdf"
     added_runtime = False
@@ -2964,10 +2969,15 @@ def doctor(
         "integrity": info["integrity_check"] == "ok",
         "foreign_keys": info["foreign_key_violations"] == 0,
         "schema": str(info["schema_version"]) == str(SCHEMA_VERSION),
-        "required_project_files": all(path.is_file() for path in required),
+        "required_skill_files": all(path.is_file() for path in required),
         "utf8_project_files": encoding_status["project_files_valid"],
     }
     warnings: list[str] = []
+    if encoding_status["missing_files"]:
+        warnings.append(
+            "optional_project_files_missing:"
+            + ",".join(encoding_status["missing_files"])
+        )
     missing_pdf = [name for name, available in pdf_dependencies.items() if not available]
     if missing_pdf:
         warnings.append("missing_pdf_dependencies:" + ",".join(missing_pdf))

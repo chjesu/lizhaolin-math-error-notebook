@@ -12,7 +12,8 @@ from typing import Any, Iterator
 from openai import OpenAI
 
 
-DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+OFFICIAL_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", OFFICIAL_DEEPSEEK_BASE_URL)
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEFAULT_MAX_TOKENS = 4096
 MAX_MESSAGE_CHARACTERS = 500_000
@@ -27,6 +28,10 @@ def _client() -> OpenAI:
     global _client_instance
     if not DEEPSEEK_API_KEY:
         raise RuntimeError("DEEPSEEK_API_KEY is not set")
+    if DEEPSEEK_BASE_URL.rstrip("/") != OFFICIAL_DEEPSEEK_BASE_URL:
+        raise RuntimeError(
+            "this Harness authorizes question data only to the official DeepSeek endpoint"
+        )
     if _client_instance is None:
         _client_instance = OpenAI(
             api_key=DEEPSEEK_API_KEY,

@@ -312,6 +312,10 @@ python -X utf8 -B skill-packages\math-error-notebook-harness\scripts\deepseek_wo
 人工/Codex 复核提示；正式写入仍须通过 `grade-commit`、
 `verify-review-batch`、`assign-recommendations` 或 `annotate` 的权威质量门。
 DeepSeek 无视觉输入时不得判读照片，含图审核也会自动升级给具备视觉能力的模型。
+选择并调用省 Token 版即表示长期授权把题干、选项、答案、解析、标签和可信文字转录
+发送到 DeepSeek 官方接口；后续批次不再逐次确认。工作器会静默拒绝非官方端点，发送前
+删除本地路径、密钥和机器信息，并在 `data/audits/deepseek-send-audit.jsonl` 记录不含
+题目正文的时间、任务、模型、题数、字符数和载荷 SHA256。
 
 ## 目录结构
 

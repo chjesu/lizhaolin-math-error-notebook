@@ -218,6 +218,56 @@ class DeepSeekWorkerTests(unittest.TestCase):
         self.assertFalse(deepseek_worker.choose_thinking("recommend", "auto"))
         self.assertFalse(deepseek_worker.choose_thinking("tag", "auto"))
 
+    def test_question_data_sanitizer_removes_local_only_fields(self):
+        payload = {
+            "stem": "解方程",
+            "image_path": r"C:\\Users\\student\\work.jpg",
+            "source_record": {
+                "source_path": r"C:\\Downloads\\exam.docx",
+                "answer": "$1$",
+                "api_key": "must-not-leak",
+            },
+            "notes": [r"C:\\private\\note.txt", "题目数据"],
+        }
+        cleaned = deepseek_worker.sanitize_question_data(payload)
+        self.assertEqual(cleaned["stem"], "解方程")
+        self.assertNotIn("image_path", cleaned)
+        self.assertNotIn("source_path", cleaned["source_record"])
+        self.assertNotIn("api_key", cleaned["source_record"])
+        self.assertEqual(cleaned["source_record"]["answer"], "$1$")
+        self.assertEqual(cleaned["notes"][0], "[local-path-redacted]")
+
+    def test_standing_authorization_rejects_non_official_endpoint(self):
+        original = deepseek_worker.os.environ.get("DEEPSEEK_BASE_URL")
+        try:
+            deepseek_worker.os.environ["DEEPSEEK_BASE_URL"] = "https://example.invalid"
+            with self.assertRaisesRegex(RuntimeError, "official DeepSeek endpoint"):
+                deepseek_worker.authorized_deepseek_endpoint()
+        finally:
+            if original is None:
+                deepseek_worker.os.environ.pop("DEEPSEEK_BASE_URL", None)
+            else:
+                deepseek_worker.os.environ["DEEPSEEK_BASE_URL"] = original
+
+    def test_send_audit_contains_metadata_but_not_question_text(self):
+        messages, audit = deepseek_worker.prepare_outbound_messages(
+            "tag",
+            {"stem": "private question text", "source_path": r"C:\\exam.docx"},
+            CATALOGS,
+            "deepseek-v4-flash",
+            False,
+        )
+        self.assertIn("private question text", messages[1]["content"])
+        self.assertNotIn("source_path", messages[1]["content"])
+        serialized_audit = json.dumps(audit, ensure_ascii=False)
+        self.assertNotIn("private question text", serialized_audit)
+        self.assertEqual(len(audit["payload_sha256"]), 64)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "audit.jsonl"
+            deepseek_worker.append_send_audit(audit, path)
+            logged = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(logged["authorization"], deepseek_worker.STANDING_SEND_AUTHORIZATION)
+
     @unittest.skipIf(safe_init is None, "optional DeepSeek client is not installed")
     def test_protocol_wrapper_requires_reasoning_content_for_tool_history(self):
         history = safe_init.validate_history(

@@ -113,7 +113,7 @@ flowchart LR
 | 优先级 | 入口 | 用途 | 是否可写主库 |
 |---|---|---|---|
 | 1 | `.agents/.../scripts/notebook.py` | 全部常规业务、导入、审核、推荐和学习状态 | 是，受校验约束 |
-| 2 | `skill-packages/math-error-notebook-harness/scripts/deepseek_worker.py` | 省 Token 安装包将文字判题、文本审核、推荐复核和标签建议下放给 DeepSeek，生成经本地门控的候选文件 | 否，始终报告 `database_modified=false` |
+| 2 | `skill-packages/math-error-notebook-harness/scripts/deepseek_worker.py` | 省 Token 安装包将文字判题、文本审核、推荐复核和标签建议下放给 DeepSeek，生成经本地门控的候选文件；启用该安装包即长期授权题目数据发送到 DeepSeek 官方端点，不逐批提示 | 否，始终报告 `database_modified=false`；发送前删除本地路径、密钥和机器信息，并写元数据审计 |
 | 2 | `.agents/.../scripts/practice_sheet.py` | 从已保存推荐生成 PDF 并打印 | 否，仅输出文件/打印 |
 | 3 | `scripts/extract_docx_omml.py` + `build_omml_exam_import.py` | DOCX/OMML 提取和未验证导入文件构建 | 否 |
 | 3 | `scripts/extract_pdf_text.py` | PDF 原文审核辅助 | 否 |
@@ -234,7 +234,7 @@ python -B .agents\skills\math-error-notebook\scripts\practice_sheet.py --exam-pa
 | `scripts/_test_extract.py` | 临时烟雾测试 | 预览 `docx_extractor.py` 前 5 题 | 不是生产入口 |
 | `scripts/extract_pdf_text.py` | 通用、只读 | 使用 pypdf 提取分页文本供源文件审核 | 文本型 PDF 使用；扫描 PDF 仍需图像/OCR复核 |
 | `scripts/audit_deepseek_db.py` | 历史取证、只读 | 比较候选库与唯一主库，输出插入/删除/字段差异及近似题 | 只生成报告，禁止据此自动合库 |
-| `skill-packages/math-error-notebook-harness/scripts/deepseek_worker.py` + `safe_init.py` | 省 Token 版 DeepSeek Harness 工作器 | 支持 `grade/verify/recommend/tag` 四种文字任务；验证输入身份、题号、目录代码、置信度和输出结构；含图、无学生步骤、遗漏、冲突及低置信度项升级给 Codex；依赖隔离在 `.runtime/deepseek` | 不写数据库；只运行 `grade-preview` 或 `prepare-review-batch` 等无写入质量门；正式提交仍经权威 `notebook.py`，API Key 只从环境变量读取 |
+| `skill-packages/math-error-notebook-harness/scripts/deepseek_worker.py` + `safe_init.py` | 省 Token 版 DeepSeek Harness 工作器 | 支持 `grade/verify/recommend/tag` 四种文字任务；启用 Harness 版即长期授权题目数据发送到官方 `https://api.deepseek.com`，不逐批提示；发送前删除本地路径、密钥和机器信息，审计日志只保存任务、模型、题数、字符数和载荷哈希；含图、无学生步骤、遗漏、冲突及低置信度项升级给 Codex | 不写数据库；只运行 `grade-preview` 或 `prepare-review-batch` 等无写入质量门；正式提交仍经权威 `notebook.py`，API Key 只从环境变量读取 |
 | `scripts/sync_skill_packages.py` | 安装包一致性检查 | 检查两个安装包的共享文件逐字节一致；`--sync` 只把纯 Codex 版的共享文件复制到 Harness 版 | 不写数据库；不得把 Harness 专属文件同步回纯 Codex 版 |
 | `scripts/audit_codex_rollout.py` | 历史取证、只读 | 将 Codex rollout JSONL 脱敏并生成可审核时间线 | 仅在有操作日志文件时使用 |
 | `scripts/build_db_correction_map.py` | 专项迁移、只读 | 将重新提取的来源题映射到题库内部 ID | 只产出 correction JSON，不直接改库 |

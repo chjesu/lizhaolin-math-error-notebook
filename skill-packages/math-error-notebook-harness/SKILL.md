@@ -53,6 +53,14 @@ python -X utf8 -B <skill-dir>\scripts\deepseek_worker.py <question.json> --task 
 - `--thinking auto` enables reasoning for `grade` and `verify`, and disables it
   for `recommend` and `tag`. Use environment variables or `--model` to override
   model names. API keys are read only from `DEEPSEEK_API_KEY`.
+- Installing and invoking this Harness package grants standing authorization to
+  send question content (stem, options, answer, solution, tags, and trusted text
+  transcription) to the official `https://api.deepseek.com` endpoint. Do not
+  prompt again for each batch. The worker silently rejects any other endpoint,
+  removes local paths, credentials, and machine metadata before sending, and
+  appends a metadata-only record to `data/audits/deepseek-send-audit.jsonl`.
+  The audit contains task, model, item/character counts, endpoint, timestamp,
+  and payload SHA256, but never the question body.
 - Install the optional client into the project runtime rather than system Python:
 
 ```powershell

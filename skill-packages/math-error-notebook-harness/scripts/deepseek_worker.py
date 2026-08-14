@@ -7,6 +7,8 @@ the next authoritative ``notebook.py`` command after review.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -28,6 +30,28 @@ TASKS = ("grade", "verify", "recommend", "tag")
 MIN_CONFIDENCE = {"grade": 0.9, "verify": 0.9, "recommend": 0.8, "tag": 0.85}
 MAX_VERIFY_ITEMS = 20
 MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
+OFFICIAL_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+STANDING_SEND_AUTHORIZATION = "harness_package_question_data_authorization"
+SEND_AUDIT_PATH = PROJECT_ROOT / "data/audits/deepseek-send-audit.jsonl"
+SENSITIVE_FIELD_NAMES = {
+    "api_key",
+    "authorization",
+    "computer_name",
+    "cwd",
+    "database",
+    "database_path",
+    "db_path",
+    "environment",
+    "hostname",
+    "password",
+    "preview_path",
+    "preview_paths",
+    "secret",
+    "system_info",
+    "token",
+    "username",
+}
+LOCAL_PATH_VALUE = re.compile(r"^(?:[a-z]:[\\/]|\\\\|file://)", re.IGNORECASE)
 
 
 def read_json(path: Path) -> Any:
@@ -44,6 +68,76 @@ def write_json(path: Path, payload: Any, force: bool = False) -> None:
     path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+
+
+def _private_field(field: Any) -> bool:
+    normalized = str(field).strip().lower().replace("-", "_")
+    return (
+        normalized in SENSITIVE_FIELD_NAMES
+        or normalized.endswith("_path")
+        or normalized.endswith("_paths")
+    )
+
+
+def sanitize_question_data(value: Any) -> Any:
+    """Remove local-only metadata while preserving question content."""
+    if isinstance(value, dict):
+        return {
+            str(key): sanitize_question_data(item)
+            for key, item in value.items()
+            if not _private_field(key)
+        }
+    if isinstance(value, list):
+        return [sanitize_question_data(item) for item in value]
+    if isinstance(value, tuple):
+        return [sanitize_question_data(item) for item in value]
+    if isinstance(value, str) and LOCAL_PATH_VALUE.match(value.strip()):
+        return "[local-path-redacted]"
+    return value
+
+
+def authorized_deepseek_endpoint() -> str:
+    endpoint = os.getenv("DEEPSEEK_BASE_URL", OFFICIAL_DEEPSEEK_BASE_URL).rstrip("/")
+    if endpoint != OFFICIAL_DEEPSEEK_BASE_URL:
+        raise RuntimeError(
+            "standing authorization permits only the official DeepSeek endpoint: "
+            + OFFICIAL_DEEPSEEK_BASE_URL
+        )
+    return endpoint
+
+
+def prepare_outbound_messages(
+    task: str, data: Any, catalogs: dict[str, Any], model: str, thinking: bool
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    endpoint = authorized_deepseek_endpoint()
+    messages = build_messages(task, sanitize_question_data(data), catalogs)
+    serialized = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(data, list):
+        item_count = len(data)
+    elif isinstance(data, dict) and isinstance(data.get("items"), list):
+        item_count = len(data["items"])
+    else:
+        item_count = 1
+    audit = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event": "deepseek_send_authorized",
+        "authorization": STANDING_SEND_AUTHORIZATION,
+        "recipient": "DeepSeek",
+        "endpoint": endpoint,
+        "task": task,
+        "model": model,
+        "thinking": thinking,
+        "item_count": item_count,
+        "character_count": len(serialized),
+        "payload_sha256": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+    }
+    return messages, audit
+
+
+def append_send_audit(audit: dict[str, Any], path: Path = SEND_AUDIT_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(json.dumps(audit, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
 def run_notebook_json(*arguments: str) -> Any:
@@ -396,7 +490,7 @@ def choose_model(task: str, requested: str | None) -> str:
 
 def call_deepseek(
     task: str, data: Any, catalogs: dict[str, Any], model: str, thinking: bool
-) -> tuple[str, dict[str, Any]]:
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
     if not os.getenv("DEEPSEEK_API_KEY"):
         raise RuntimeError("DEEPSEEK_API_KEY is not set")
     if DEEPSEEK_RUNTIME.is_dir():
@@ -416,14 +510,18 @@ def call_deepseek(
         "recommend": 2048,
         "tag": 2048,
     }[task]
+    messages, send_audit = prepare_outbound_messages(
+        task, data, catalogs, model, thinking
+    )
+    append_send_audit(send_audit)
     response = safe_deepseek_call(
         model=model,
         enable_thinking=thinking,
         max_tokens=max_tokens,
         response_format={"type": "json_object"},
-        messages=build_messages(task, data, catalogs),
+        messages=messages,
     )
-    return response.get("content"), response.get("_dsk_usage") or {}
+    return response.get("content"), response.get("_dsk_usage") or {}, send_audit
 
 
 def parse_verify_candidate(
@@ -651,10 +749,13 @@ def run_task(args: argparse.Namespace) -> dict[str, Any]:
     if not 0 < minimum <= 1:
         raise ValueError("--min-confidence must be between 0 and 1")
     escalations: list[dict[str, str]] = []
+    send_audit: dict[str, Any] | None = None
 
     if args.task == "grade":
         evidence = validate_grade_evidence(payload)
-        content, usage = call_deepseek("grade", evidence, catalogs, model, thinking)
+        content, usage, send_audit = call_deepseek(
+            "grade", evidence, catalogs, model, thinking
+        )
         candidate = parse_grade_candidate(content, read_json(ERROR_TEMPLATE), evidence)
         escalations.extend(grade_escalations(candidate, evidence, minimum))
         write_json(args.out, candidate, args.force)
@@ -672,7 +773,9 @@ def run_task(args: argparse.Namespace) -> dict[str, Any]:
         usage = {}
         if packets:
             data = [compact_audit_packet(packet) for packet in packets]
-            content, usage = call_deepseek("verify", data, catalogs, model, thinking)
+            content, usage, send_audit = call_deepseek(
+                "verify", data, catalogs, model, thinking
+            )
             candidate, model_escalations = parse_verify_candidate(
                 content, packets, catalogs, minimum, f"deepseek-harness/{model}"
             )
@@ -697,7 +800,9 @@ def run_task(args: argparse.Namespace) -> dict[str, Any]:
             "requested_limit": args.limit,
             "items": packet["items"],
         }
-        content, usage = call_deepseek("recommend", model_input, catalogs, model, thinking)
+        content, usage, send_audit = call_deepseek(
+            "recommend", model_input, catalogs, model, thinking
+        )
         candidate, escalations = parse_recommend_candidate(
             content, packet, minimum, args.limit
         )
@@ -716,7 +821,9 @@ def run_task(args: argparse.Namespace) -> dict[str, Any]:
         if escalations:
             candidate = None
         else:
-            content, usage = call_deepseek("tag", question, catalogs, model, thinking)
+            content, usage, send_audit = call_deepseek(
+                "tag", question, catalogs, model, thinking
+            )
             candidate, model_escalations = parse_tag_candidate(
                 content, catalogs, minimum, question_id
             )
@@ -740,6 +847,9 @@ def run_task(args: argparse.Namespace) -> dict[str, Any]:
         "local_gate": gate,
         "escalations": escalations,
         "usage": usage,
+        "send_authorization": STANDING_SEND_AUTHORIZATION,
+        "send_performed": send_audit is not None,
+        "send_audit": send_audit,
         "database_modified": False,
         "next_command": next_command,
     }

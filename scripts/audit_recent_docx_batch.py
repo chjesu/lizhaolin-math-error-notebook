@@ -124,21 +124,40 @@ def structural_problems(packet: dict[str, Any]) -> list[str]:
     return sorted(set(problems))
 
 
+def audit_sources(files: list[dict[str, Any]], include_existing: bool = False) -> list[str]:
+    """Select imported sources, optionally including idempotent recovery reruns."""
+    sources: list[str] = []
+    for item in files:
+        status = item.get("status")
+        imported = (
+            status == "imported"
+            and int((item.get("import_result") or {}).get("inserted") or 0) > 0
+        )
+        recovered = (
+            include_existing
+            and status == "skipped_existing_source"
+            and int(item.get("existing_questions") or 0) > 0
+        )
+        if imported or recovered:
+            sources.append(str(item["source_name"]))
+    return sources
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("import_manifest", type=Path)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--reviewer", default="codex")
+    parser.add_argument(
+        "--include-existing",
+        action="store_true",
+        help="audit idempotently skipped existing sources in a recovery manifest",
+    )
     args = parser.parse_args()
 
     source_manifest = json.loads(args.import_manifest.read_text(encoding="utf-8"))
     files = source_manifest.get("files") or []
-    sources = [
-        item["source_name"]
-        for item in files
-        if item.get("status") == "imported"
-        and int((item.get("import_result") or {}).get("inserted") or 0) > 0
-    ]
+    sources = audit_sources(files, include_existing=args.include_existing)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     audited: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []

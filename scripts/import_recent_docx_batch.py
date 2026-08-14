@@ -56,8 +56,9 @@ def infer_grade(name: str) -> int:
 
 
 def infer_semester(name: str) -> int:
-    second_markers = ("第二学期", "下学期", "2月", "3月", "4月", "5月", "二模", "一模")
-    return 2 if any(marker in name for marker in second_markers) else 1
+    second_markers = ("第二学期", "下学期", "3月", "4月", "5月", "二模", "一模")
+    explicit_february = re.search(r"(?<!\d)2月", name)
+    return 2 if explicit_february or any(marker in name for marker in second_markers) else 1
 
 
 def infer_year(name: str) -> str:
@@ -162,15 +163,20 @@ def main() -> int:
 
     for index, path in enumerate(recent_docx(args.directory, args.from_date, args.to_date), 1):
         name = source_name(path)
-        file_hash = sha256(path)
-        content_hash = docx_content_sha256(path)
         entry: dict[str, Any] = {
             "file": str(path.resolve()),
             "source_name": name,
-            "sha256": file_hash,
-            "content_sha256": content_hash,
             "modified_date": datetime.fromtimestamp(path.stat().st_mtime).date().isoformat(),
         }
+        try:
+            file_hash = sha256(path)
+            content_hash = docx_content_sha256(path)
+        except (OSError, zipfile.BadZipFile, ValueError) as exc:
+            entry.update(status="failed", error=str(exc))
+            records.append(entry)
+            failures.append({"source_name": name, "error": str(exc)})
+            continue
+        entry.update(sha256=file_hash, content_sha256=content_hash)
         if content_hash in seen_content_hashes:
             entry.update(
                 status="skipped_duplicate_file",

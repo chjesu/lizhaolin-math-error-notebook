@@ -12,6 +12,26 @@ SPEC.loader.exec_module(MODULE)
 
 
 class AuditRecentDocxBatchTests(unittest.TestCase):
+    def test_recovery_manifest_can_include_existing_sources_explicitly(self):
+        files = [
+            {
+                "status": "imported",
+                "source_name": "new source",
+                "import_result": {"inserted": 20},
+            },
+            {
+                "status": "skipped_existing_source",
+                "source_name": "recovered source",
+                "existing_questions": 18,
+            },
+        ]
+
+        self.assertEqual(MODULE.audit_sources(files), ["new source"])
+        self.assertEqual(
+            MODULE.audit_sources(files, include_existing=True),
+            ["new source", "recovered source"],
+        )
+
     def test_image_check_covers_options_and_answer(self):
         missing = "definitely-missing-import-image.png"
         problems = MODULE.image_problems({

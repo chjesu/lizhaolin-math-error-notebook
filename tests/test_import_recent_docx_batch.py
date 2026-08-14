@@ -45,6 +45,10 @@ class ImportRecentDocxBatchInferenceTests(unittest.TestCase):
         self.assertEqual(MODULE.infer_year("2024年新课标全国Ⅰ卷数学真题"), "2024")
         self.assertEqual(MODULE.infer_year("2025年高考北京卷数学真题"), "2025")
 
+    def test_infer_semester_does_not_treat_december_as_february(self):
+        self.assertEqual(MODULE.infer_semester("高三上学期12月月考数学试卷"), 1)
+        self.assertEqual(MODULE.infer_semester("高三下学期2月开学考数学试卷"), 2)
+
     def test_quality_gate_accepts_complete_builder_summary(self):
         summary = {
             "questions": 20,

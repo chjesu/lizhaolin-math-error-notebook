@@ -20,6 +20,29 @@ description: Manage a Chinese high-school math error notebook backed by one loca
 - `--json` is compact by default. Use global `--pretty-json` only for human inspection. `search`, `recommend`, and `audit-queue` omit long solutions/raw records unless `--full` is explicit.
 - Before imports or maintenance, run `bank-info --json`. Run `init` then idempotent `seed` only when the canonical bank does not exist.
 
+## First-run onboarding
+
+When the user says the Skill was just installed, asks how to begin, or has not
+yet bound a notebook, follow this section and guide them in plain language. Do
+not make the user type shell commands unless they explicitly ask for manual
+operation.
+
+1. Distinguish an existing notebook from a new blank notebook without scanning
+   other drives. An existing notebook is used by opening its project directory
+   in Codex or by setting `LIZHAOLIN_MATH_NOTEBOOK_ROOT`.
+2. For an existing notebook, run `doctor --json` and `bank-info --json`, then
+   report the bound database path, verified/unverified counts, error count, and
+   whether it is ready. Never run `init` or `seed` over it.
+3. For a new notebook, obtain confirmation that the current directory is the
+   intended new location, then run `init`, `seed`, `doctor --json`, and
+   `bank-info --json`. Report the actual seed count instead of hard-coding it.
+4. End onboarding with three or four copy-ready natural-language examples for
+   grading a photo, checking reviews, importing authorized questions, and
+   generating a questions-only PDF. State that answers and printing are opt-in.
+5. If binding or health checks fail, explain the single next action in plain
+   language. Do not create a second database, search the computer for another
+   bank, or install the optional download watcher.
+
 ## Grade work
 
 1. For photos, first create cached, size-controlled previews. The local step performs only EXIF orientation, white-background conversion for transparent images, JPEG encoding, and resizing. Open **every** returned `preview_path` with the current remote vision-capable model:

@@ -391,7 +391,7 @@ PowerShell 读取项目文本必须显式使用 `Get-Content -Encoding UTF8`，P
 - 推荐：`recommend-packet --limit 3 → 模型只复核精简题干 → assign-recommendations <同一packet>`；仅对个别疑难候选调用 `question <id>`，不再默认加载全部答案与长解析
 - 每日复习：`daily-review-packet → 补齐缺少的已复核推荐 → practice_sheet.py --daily-packet`；积压阶段不再重复变成多份任务
 - 批量 DOCX：`import_recent_docx_batch.py → audit_recent_docx_batch.py`
-- 验证：`audit-summary → audit-queue/prepare-audit-batch [--simplified-only] → 模型输出精简决策 → prepare-review-batch → verify-review-batch`
+- 验证：`audit-summary → audit-queue/prepare-audit-batch [--simplified-only] → 模型输出携带 packet_sha256 的精简决策 → prepare-review-batch（首次快照校验） → verify-review-batch（写库前再次校验）`
 - 长任务：`workflow-start → workflow-update → workflow-status`，断线或更换模型后从未完成步骤继续
 - 交接：`handoff`
 

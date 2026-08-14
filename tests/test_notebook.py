@@ -663,6 +663,7 @@ class NotebookTests(unittest.TestCase):
             "question_id": question_id,
             "verdict": "pass",
             "reviewer": "unit-test",
+            "packet_sha256": packet["packet_sha256"],
             "checklist": {
                 "stem_complete": True,
                 "source_checked": True,
@@ -683,7 +684,7 @@ class NotebookTests(unittest.TestCase):
             "correction": {},
         }
         review_path = self.root / "review.json"
-        review_path.write_text(json.dumps(review, ensure_ascii=False), encoding="utf-8")
+        review_path.write_text(json.dumps(review, ensure_ascii=False), encoding="utf-8-sig")
         result = notebook.apply_verification_review(self.conn, question_id, review_path)
         self.assertEqual(result["verified"], 1)
         self.assertIn("tangent", result["feature_codes"])
@@ -861,6 +862,9 @@ class NotebookTests(unittest.TestCase):
             "question_id": question_id,
             "verdict": "pass",
             "reviewer": "unit-test",
+            "packet_sha256": notebook.audit_item(
+                self.conn, question_id
+            )["packet_sha256"],
             "checklist": {"stem_complete": True},
             "independent_answer": "$2x$",
             "independent_solution": "独立求导。",
@@ -918,6 +922,9 @@ class NotebookTests(unittest.TestCase):
             "question_id": pass_id,
             "verdict": "pass",
             "reviewer": "unit-test",
+            "packet_sha256": notebook.audit_item(
+                self.conn, pass_id
+            )["packet_sha256"],
             "checklist": {
                 "stem_complete": True,
                 "source_checked": True,
@@ -941,6 +948,9 @@ class NotebookTests(unittest.TestCase):
             "question_id": revise_id,
             "verdict": "needs_revision",
             "reviewer": "unit-test",
+            "packet_sha256": notebook.audit_item(
+                self.conn, revise_id
+            )["packet_sha256"],
             "review_note": "答案和解析均为占位文本。",
         }
         pass_path = self.root / "pass.review.json"
@@ -955,7 +965,7 @@ class NotebookTests(unittest.TestCase):
                     {"question_id": revise_id, "review": str(revise_path)},
                 ]
             }, ensure_ascii=False),
-            encoding="utf-8",
+            encoding="utf-8-sig",
         )
         result = notebook.apply_verification_review_batch(self.conn, manifest)
         self.assertEqual(result["processed"], 2)
@@ -970,6 +980,9 @@ class NotebookTests(unittest.TestCase):
     def test_prepare_review_batch_expands_concise_decision_without_writing_db(self):
         row = self.conn.execute("SELECT id,grade FROM questions LIMIT 1").fetchone()
         question_id = row["id"]
+        packet_sha256 = notebook.audit_item(
+            self.conn, question_id
+        )["packet_sha256"]
         before = self.conn.execute("SELECT COUNT(*) FROM verification_reviews").fetchone()[0]
         decisions = self.root / "decisions.json"
         decisions.write_text(json.dumps({
@@ -977,6 +990,7 @@ class NotebookTests(unittest.TestCase):
             "items": [{
                 "question_id": question_id,
                 "verdict": "pass",
+                "packet_sha256": packet_sha256,
                 "checks_confirmed": True,
                 "independent_answer": "独立答案",
                 "independent_solution": "独立推导过程",
@@ -984,7 +998,7 @@ class NotebookTests(unittest.TestCase):
                 "solution_check": "match",
                 "review_note": "逐项检查完成",
             }],
-        }, ensure_ascii=False), encoding="utf-8")
+        }, ensure_ascii=False), encoding="utf-8-sig")
         out_dir = self.root / "expanded-reviews"
         result = notebook.prepare_verification_reviews(self.conn, decisions, out_dir)
         review = json.loads(next(out_dir.glob("*.review.json")).read_text(encoding="utf-8"))
@@ -993,6 +1007,64 @@ class NotebookTests(unittest.TestCase):
         self.assertTrue(review["checklist"]["answer_derived"])
         self.assertEqual(review["grade"], row["grade"])
         self.assertEqual(before, after)
+
+    def test_stale_verification_review_is_rejected_without_writing(self):
+        row = self.conn.execute("SELECT id FROM questions LIMIT 1").fetchone()
+        question_id = row["id"]
+        packet_sha256 = notebook.audit_item(
+            self.conn, question_id
+        )["packet_sha256"]
+        review = {
+            "question_id": question_id,
+            "verdict": "needs_revision",
+            "reviewer": "unit-test",
+            "packet_sha256": packet_sha256,
+            "review_note": "旧审核不得覆盖新状态。",
+        }
+        review_path = self.root / "stale.review.json"
+        review_path.write_text(json.dumps(review, ensure_ascii=False), encoding="utf-8")
+        self.conn.execute(
+            "UPDATE questions SET difficulty=difficulty+0.1 WHERE id=?",
+            (question_id,),
+        )
+        self.conn.commit()
+
+        with self.assertRaisesRegex(ValueError, "stale review snapshot"):
+            notebook.apply_verification_review(self.conn, question_id, review_path)
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM verification_reviews WHERE question_id=?",
+                (question_id,),
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_stale_concise_decision_is_rejected(self):
+        row = self.conn.execute("SELECT id FROM questions LIMIT 1").fetchone()
+        question_id = row["id"]
+        packet_sha256 = notebook.audit_item(
+            self.conn, question_id
+        )["packet_sha256"]
+        decisions = self.root / "stale-decisions.json"
+        decisions.write_text(json.dumps({
+            "reviewer": "unit-test",
+            "items": [{
+                "question_id": question_id,
+                "verdict": "needs_revision",
+                "packet_sha256": packet_sha256,
+                "review_note": "旧决策不得扩展。",
+            }],
+        }, ensure_ascii=False), encoding="utf-8")
+        self.conn.execute(
+            "UPDATE questions SET difficulty=difficulty+0.1 WHERE id=?",
+            (question_id,),
+        )
+        self.conn.commit()
+
+        with self.assertRaisesRegex(ValueError, "stale decision snapshot"):
+            notebook.prepare_verification_reviews(
+                self.conn, decisions, self.root / "stale-expanded"
+            )
 
     def test_structural_features_are_used_in_recommendation_reason(self):
         notebook.import_records(

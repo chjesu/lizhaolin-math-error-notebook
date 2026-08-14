@@ -32,7 +32,7 @@ MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
 
 def read_json(path: Path) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot read JSON from {path}: {exc}") from exc
 
@@ -467,9 +467,12 @@ def parse_verify_candidate(
         decision: dict[str, Any] = {
             "question_id": question_id,
             "verdict": verdict,
+            "packet_sha256": str(packet_map[question_id].get("packet_sha256") or ""),
             "review_note": str(raw.get("review_note") or "").strip(),
             "confidence": confidence,
         }
+        if not re.fullmatch(r"[0-9a-f]{64}", decision["packet_sha256"]):
+            raise ValueError(f"{question_id}: audit packet_sha256 is required")
         if verdict in {"pass", "corrected"}:
             if raw.get("checks_confirmed") is not True:
                 raise ValueError(f"{question_id}: checks_confirmed must be true")

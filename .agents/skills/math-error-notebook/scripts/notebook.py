@@ -2508,11 +2508,33 @@ def apply_verification_review(
     question_id: str,
     review_path: Path,
 ) -> dict[str, Any]:
-    review = json.loads(review_path.read_text(encoding="utf-8"))
+    review = json.loads(review_path.read_text(encoding="utf-8-sig"))
     if not isinstance(review, dict):
         raise ValueError("review must be a JSON object")
     if str(review.get("question_id") or "") != question_id:
         raise ValueError("review question_id does not match command question_id")
+    expected_snapshot = str(review.get("packet_sha256") or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_snapshot):
+        raise ValueError("review packet_sha256 is required")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        current_snapshot = audit_item(conn, question_id)["packet_sha256"]
+        if current_snapshot != expected_snapshot:
+            raise ValueError(
+                f"{question_id}: stale review snapshot; regenerate the audit packet"
+            )
+        return _apply_verification_review_locked(conn, question_id, review)
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+
+
+def _apply_verification_review_locked(
+    conn: sqlite3.Connection,
+    question_id: str,
+    review: dict[str, Any],
+) -> dict[str, Any]:
     verdict = str(review.get("verdict") or "").strip()
     if verdict not in {"pass", "corrected", "needs_revision", "reject"}:
         raise ValueError("verdict must be pass, corrected, needs_revision, or reject")
@@ -2615,7 +2637,7 @@ def apply_verification_review_batch(
     manifest_path: Path,
 ) -> dict[str, Any]:
     """Apply item-level review files through the canonical verifier with compact output."""
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     items = manifest.get("items") if isinstance(manifest, dict) else None
     if not isinstance(items, list):
         raise ValueError("review manifest must contain an items array")
@@ -2661,7 +2683,7 @@ def prepare_verification_reviews(
     out_dir: Path,
 ) -> dict[str, Any]:
     """Expand concise model decisions into canonical item-level review files."""
-    payload = json.loads(decisions_path.read_text(encoding="utf-8"))
+    payload = json.loads(decisions_path.read_text(encoding="utf-8-sig"))
     items = payload.get("items") if isinstance(payload, dict) else None
     reviewer = str((payload or {}).get("reviewer") or "").strip()
     if not reviewer or not isinstance(items, list):
@@ -2673,14 +2695,21 @@ def prepare_verification_reviews(
         verdict = str((item or {}).get("verdict") or "").strip()
         if not question_id or verdict not in {"pass", "corrected", "needs_revision", "reject"}:
             raise ValueError("each decision requires question_id and a valid verdict")
+        expected_snapshot = str((item or {}).get("packet_sha256") or "").strip()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_snapshot):
+            raise ValueError(f"{question_id}: packet_sha256 is required")
         packet = audit_item(conn, question_id)
+        if packet["packet_sha256"] != expected_snapshot:
+            raise ValueError(
+                f"{question_id}: stale decision snapshot; regenerate the audit packet"
+            )
         question = packet["question"]
         review: dict[str, Any] = {
             "question_id": question_id,
             "verdict": verdict,
             "reviewer": reviewer,
             "review_note": str(item.get("review_note") or "").strip(),
-            "packet_sha256": packet["packet_sha256"],
+            "packet_sha256": expected_snapshot,
         }
         if verdict in {"pass", "corrected"}:
             if item.get("checks_confirmed") is not True:

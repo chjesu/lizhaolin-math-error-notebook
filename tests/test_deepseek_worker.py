@@ -2,6 +2,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 
@@ -112,7 +113,7 @@ class DeepSeekWorkerTests(unittest.TestCase):
         )
 
     def test_valid_verification_candidate_is_prepared(self):
-        packet = {"question": {"id": "Q-1"}}
+        packet = {"question": {"id": "Q-1"}, "packet_sha256": "a" * 64}
         content = json.dumps(
             {
                 "items": [
@@ -142,7 +143,14 @@ class DeepSeekWorkerTests(unittest.TestCase):
             content, [packet], CATALOGS, 0.9, "test-reviewer"
         )
         self.assertEqual(decision["items"][0]["question_id"], "Q-1")
+        self.assertEqual(decision["items"][0]["packet_sha256"], "a" * 64)
         self.assertEqual(escalations, [])
+
+    def test_json_reader_accepts_utf8_bom(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "packet.json"
+            path.write_text('{"ok":true}', encoding="utf-8-sig")
+            self.assertEqual(deepseek_worker.read_json(path), {"ok": True})
 
     def test_low_confidence_verification_is_not_accepted(self):
         content = json.dumps(

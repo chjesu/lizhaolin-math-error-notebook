@@ -715,6 +715,9 @@ class NotebookTests(unittest.TestCase):
             self.conn, "审核批次脚手架测试", 5, out_dir, "unit-test", False
         )
         manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+        packet = json.loads(
+            Path(manifest["items"][0]["packet"]).read_text(encoding="utf-8")
+        )
         review_path = Path(manifest["items"][0]["review"])
         review = json.loads(review_path.read_text(encoding="utf-8"))
         after = self.conn.execute(
@@ -722,6 +725,12 @@ class NotebookTests(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(result["prepared"], 1)
         self.assertEqual(review["verdict"], "pending")
+        self.assertEqual(
+            packet["packet_sha256"],
+            notebook.audit_item(
+                self.conn, manifest["items"][0]["question_id"]
+            )["packet_sha256"],
+        )
         self.assertFalse(review["checklist"]["answer_derived"])
         self.assertEqual(before, after)
 

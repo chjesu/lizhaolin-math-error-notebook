@@ -3315,12 +3315,6 @@ def prepare_audit_batch(
                 preflight_mode=preflight_mode,
                 force=force,
             )
-        unsigned_packet = dict(packet)
-        unsigned_packet.pop("packet_sha256", None)
-        canonical = json.dumps(
-            unsigned_packet, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        )
-        packet["packet_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         packet_path.write_text(
             json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8"
         )

@@ -169,6 +169,26 @@ API Key 仅通过 `DEEPSEEK_API_KEY` 环境变量读取，不写入仓库或候�
 
 两版都只通过 `notebook.py` 访问唯一主库；Harness 永远不直接写数据库。照片、图形、歧义内容、低置信度结果和正式提交仍交给 Codex。不要同时安装两版，以免同一请求触发两个 Skill。
 
+#### 2026-08-15 同包审核实测
+
+在同一台电脑、同一长会话和同一份 4 道纯文本数学题审核包上，两版逐题结论完全一致，均为 `4/4` 通过；测试只生成候选和运行本地质量门，没有写入生产题库。
+
+| 指标 | 纯 Codex 版 | Codex + Harness 省 Token 版 |
+|---|---:|---:|
+| ChatGPT 输入 Token | 404,950（缓存 397,568） | 103,746（缓存 102,016） |
+| ChatGPT 输出 Token | 3,470 | 625 |
+| DeepSeek Token | 0 | 输入 4,135；输出 1,559 |
+| 端到端时间 | 约 114 秒 | 26.7 秒（Worker 17.81 秒） |
+| 实际新增 API 费用 | $0（Codex 订阅额度） | DeepSeek 约 $0.00316 |
+| 按 API 单价折算的总成本 | 约 $0.3398 | 约 $0.0816 |
+| 审核结果 | 4/4 通过 | 4/4 通过，与纯 Codex 一致 |
+
+本次实测中，省 Token 版将 ChatGPT Token 减少约 **74.4%**，API 等价成本减少约 **76.0%**，端到端速度约提升 **4.3 倍**。审核包生成和结构预检是两版共用的本地确定性流程，耗时 2.23 秒，模型 Token 和费用均为 0。
+
+成功的 Harness 数据使用 `deepseek-v4-pro --thinking off`。默认 `thinking=auto` 的对照调用约 70 秒后没有返回 JSON 正文，因此未计入成功结果；对高质量简化审核包可关闭显式 thinking，疑难、矛盾或低置信度项目仍应升级给 Codex。绝对 Token 会随会话长度和缓存状态变化，尤其纯 Codex 长会话会携带较大的缓存上下文；这组数据用于说明当前项目真实工作流中的相对差异，不代表固定配额。
+
+API 等价成本按测试日官方价格计算：[GPT-5.6 Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol) 和 [DeepSeek API Pricing](https://api-docs.deepseek.com/quick_start/pricing)。Codex 订阅不会按表中的 OpenAI API 等价价格另行扣费。
+
 #### 安装纯 Codex 版
 
 在 Codex 中输入下面这句话即可从 GitHub 安装：

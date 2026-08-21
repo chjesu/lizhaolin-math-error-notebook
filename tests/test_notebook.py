@@ -331,6 +331,73 @@ class NotebookTests(unittest.TestCase):
             1,
         )
 
+    def test_delete_attempt_removes_non_attempt_and_restores_recommendation(self):
+        error_id = self.create_error()
+        question_id = notebook.recommend(
+            self.conn, error_id, 1, True, self.root
+        )[0]["question_id"]
+        self.conn.execute(
+            """INSERT INTO attempts(
+                   id,question_id,error_id,submitted_answer,is_correct,
+                   cause_code,attempted_at,note
+               ) VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                "ATT-not-attempted",
+                question_id,
+                error_id,
+                None,
+                0,
+                "incomplete_cases",
+                notebook.now_iso(),
+                "recorded before learning this material",
+            ),
+        )
+        self.conn.execute(
+            "UPDATE recommendations SET status='wrong' WHERE error_id=? AND question_id=?",
+            (error_id, question_id),
+        )
+        self.conn.commit()
+
+        result = notebook.delete_attempt(self.conn, "ATT-not-attempted")
+
+        self.assertEqual(result["question_id"], question_id)
+        self.assertEqual(result["deleted_result"], "wrong")
+        self.assertEqual(result["recommendation_status"], "assigned")
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM attempts WHERE id='ATT-not-attempted'"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT status FROM recommendations WHERE error_id=? AND question_id=?",
+                (error_id, question_id),
+            ).fetchone()[0],
+            "assigned",
+        )
+
+        status_result = notebook.set_recommendation_status(
+            self.conn, error_id, question_id, "deferred"
+        )
+        self.conn.execute(
+            "UPDATE review_schedule SET due_date=? WHERE error_id=? AND completed_at IS NULL",
+            (date.today().isoformat(), error_id),
+        )
+        self.conn.commit()
+        packet_path = self.root / "deferred-review.json"
+        notebook.daily_review_packet(self.conn, date.today(), 50, packet_path)
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        error_packet = next(
+            item for item in packet["items"] if item["error_id"] == error_id
+        )
+        self.assertEqual(status_result["previous_status"], "assigned")
+        self.assertEqual(status_result["status"], "deferred")
+        self.assertNotIn(
+            question_id,
+            [item["question_id"] for item in error_packet["questions"]],
+        )
+
     def test_recommendation_packet_is_compact_reusable_and_read_only(self):
         error_id = self.create_error()
         packet_path = self.root / "recommendation-packet.json"
@@ -387,6 +454,132 @@ class NotebookTests(unittest.TestCase):
             self.conn, error_id, 10, False, self.root, ["三角 恒等"], False, False
         )
         self.assertNotIn("Q-placeholder-local-filter", [item["question_id"] for item in items])
+
+    def test_recommendation_automatic_keywords_and_compound_features(self):
+        stem = (
+            "已知椭圆 x^2/4+y^2/m=1 的离心率为 1/2，"
+            "讨论焦点在 x 轴或 y 轴时实数 m 的值。"
+        )
+        self.assertEqual(
+            notebook.automatic_recommendation_keywords(stem),
+            ["离心率", "焦点", "x轴", "y轴", "参数", "椭圆"],
+        )
+        features = notebook.infer_question_features(stem, "填空题")
+        self.assertIn("axis-orientation", features)
+        self.assertIn("parameter-case-split", features)
+
+        vector_features = notebook.infer_question_features(
+            "已知空间向量 a 与 b 垂直，且向量 a 的模长为 6，求参数。",
+            "填空题",
+        )
+        self.assertIn("norm-dot-product", vector_features)
+
+    def test_recommendation_auto_ranking_filters_duplicates_and_language_mismatch(self):
+        analysis = {
+            "problem_text": "已知椭圆 x^2/4+y^2/m=1 的离心率为 1/2，求实数 m。",
+            "student_answer": "m=3",
+            "correct_answer": "分类讨论",
+            "correct_solution": "分别讨论长轴在 x 轴和 y 轴。",
+            "first_wrong_step": "只讨论了一个长轴方向",
+            "cause_code": "incomplete_cases",
+            "cause_detail": "遗漏长轴方向分类。",
+            "evidence": ["仅写出一个 m 值"],
+            "knowledge_codes": ["conic-ellipse"],
+            "feature_codes": ["axis-orientation", "parameter-case-split"],
+            "difficulty": 3,
+            "confidence": 0.98,
+        }
+        error_id = notebook.record_error(self.conn, analysis, self.root, False)
+        notebook.import_records(
+            self.conn,
+            [
+                {
+                    "id": "Q-ellipse-duplicate",
+                    "stem": analysis["problem_text"],
+                    "answer": "两个值",
+                    "solution": "分类讨论。",
+                    "knowledge_codes": ["conic-ellipse"],
+                    "difficulty": 3,
+                },
+                {
+                    "id": "Q-ellipse-english",
+                    "stem": "Given an ellipse with eccentricity one half, find its parameter.",
+                    "answer": "two values",
+                    "solution": "Split by the major-axis direction.",
+                    "knowledge_codes": ["conic-ellipse"],
+                    "difficulty": 3,
+                },
+                {
+                    "id": "Q-ellipse-case-target",
+                    "stem": "已知椭圆 x^2/n+y^2/12=1 的离心率，分别讨论焦点在 x 轴和 y 轴时参数 n。",
+                    "answer": "两个参数值",
+                    "solution": "按长轴方向分类。",
+                    "knowledge_codes": ["conic-ellipse"],
+                    "feature_codes": ["axis-orientation", "parameter-case-split"],
+                    "target_causes": ["incomplete_cases"],
+                    "difficulty": 3,
+                },
+                {
+                    "id": "Q-ellipse-topic-only",
+                    "stem": "求椭圆上一点处的切线方程。",
+                    "answer": "切线方程",
+                    "solution": "使用切线公式。",
+                    "knowledge_codes": ["conic-ellipse"],
+                    "difficulty": 3,
+                },
+            ],
+            "推荐排序回归测试",
+            None,
+            "Project-Original",
+            True,
+        )
+
+        items = notebook.recommend(self.conn, error_id, 4, False, self.root)
+        stems = [item["stem"] for item in items]
+        self.assertEqual(
+            stems[0],
+            "已知椭圆 x^2/n+y^2/12=1 的离心率，分别讨论焦点在 x 轴和 y 轴时参数 n。",
+        )
+        self.assertNotIn(analysis["problem_text"], stems)
+        self.assertNotIn(
+            "Given an ellipse with eccentricity one half, find its parameter.", stems
+        )
+        self.assertIn("复习目标：同难度巩固", items[0]["reason"])
+
+    def test_recommendation_packet_reports_automatic_stage_strategy(self):
+        error_id = self.create_error()
+        packet_path = self.root / "automatic-recommendation-packet.json"
+        result = notebook.recommendation_packet(
+            self.conn, error_id, 2, self.root, None, None, packet_path
+        )
+        self.assertEqual(result["retrieval"]["keyword_source"], "automatic")
+        self.assertEqual(result["retrieval"]["mode"], "same-level")
+        self.assertGreaterEqual(len(result["retrieval"]["keywords"]), 1)
+
+    def test_recommendation_evaluation_reports_rank_metrics(self):
+        cases_path = self.root / "cases.json"
+        packets_dir = self.root / "packets"
+        packets_dir.mkdir()
+        cases_path.write_text(json.dumps({
+            "schema": "math-recommendation-eval/v1",
+            "cases": [{
+                "error_id": "ERR-eval",
+                "accepted_question_ids": ["Q-good"],
+            }],
+        }), encoding="utf-8")
+        (packets_dir / "ERR-eval.json").write_text(json.dumps({
+            "items": [
+                {"question_id": "Q-noise"},
+                {"question_id": "Q-good"},
+            ],
+        }), encoding="utf-8")
+
+        result = notebook.evaluate_recommendation_packets(
+            cases_path, packets_dir, 10
+        )
+        self.assertEqual(result["hit_at_3"], 1)
+        self.assertEqual(result["recall_at_10"], 1)
+        self.assertEqual(result["details"][0]["first_accepted_rank"], 2)
 
     def test_search_defaults_to_compact_rows(self):
         rows = notebook.search_questions(
@@ -451,6 +644,58 @@ class NotebookTests(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(cycle, 2)
 
+    def test_due_collapses_overdue_stages_to_one_current_task(self):
+        error_id = self.create_error()
+        overdue_date = date.today() - timedelta(days=10)
+        self.conn.execute(
+            "UPDATE review_schedule SET due_date=? WHERE error_id=? AND completed_at IS NULL",
+            (overdue_date.isoformat(), error_id),
+        )
+        self.conn.commit()
+
+        due = notebook.review_due(self.conn, date.today())
+        summary = notebook.stats(self.conn)
+        packet_path = self.root / "collapsed-daily.json"
+        packet_result = notebook.daily_review_packet(
+            self.conn, date.today(), 12, packet_path
+        )
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(due), 1)
+        self.assertEqual(due[0]["error_id"], error_id)
+        self.assertEqual(due[0]["stage"], 1)
+        self.assertEqual(due[0]["overdue_days"], 10)
+        self.assertEqual(summary["due_reviews"], 1)
+        self.assertEqual(summary["overdue_errors"], 1)
+        self.assertEqual(packet_result["due_reviews"], 1)
+        self.assertEqual(packet_result["due_errors"], 1)
+        self.assertNotIn("due_stages", packet_result)
+        self.assertNotIn("due_stages", packet["items"][0])
+
+    def test_correct_review_shifts_future_stages_from_actual_completion(self):
+        error_id = self.create_error()
+        completed_on = date.today() + timedelta(days=10)
+
+        notebook.mark_review(self.conn, error_id, "correct", None, completed_on)
+
+        pending = self.conn.execute(
+            """SELECT stage,due_date FROM review_schedule
+               WHERE error_id=? AND completed_at IS NULL ORDER BY stage""",
+            (error_id,),
+        ).fetchall()
+        expected = [
+            (
+                completed_on
+                + timedelta(days=days - notebook.REVIEW_INTERVALS[0])
+            ).isoformat()
+            for days in notebook.REVIEW_INTERVALS[1:]
+        ]
+        self.assertEqual([row["due_date"] for row in pending], expected)
+        much_later = completed_on + timedelta(days=60)
+        due = notebook.review_due(self.conn, much_later)
+        self.assertEqual(len(due), 1)
+        self.assertEqual(due[0]["stage"], 2)
+
     def test_mark_error_mastered_keeps_completed_history_and_cancels_pending_stages(self):
         error_id = self.create_error()
         notebook.mark_review(self.conn, error_id, "correct", None, date.today())
@@ -502,10 +747,15 @@ class NotebookTests(unittest.TestCase):
         self.assertEqual(rows[0]["result"], "correct")
         self.assertIsNotNone(rows[0]["completed_at"])
         self.assertTrue(all(row["completed_at"] is None for row in rows[1:]))
-        self.assertEqual(
-            [row["due_date"] for row in rows],
-            original_due_dates,
-        )
+        expected_pending = [
+            (
+                base
+                + timedelta(days=days - notebook.REVIEW_INTERVALS[0])
+            ).isoformat()
+            for days in notebook.REVIEW_INTERVALS[1:]
+        ]
+        self.assertEqual(rows[0]["due_date"], original_due_dates[0])
+        self.assertEqual([row["due_date"] for row in rows[1:]], expected_pending)
 
     def test_verified_bank_and_coverage(self):
         summary = notebook.stats(self.conn)
@@ -1669,7 +1919,7 @@ class NotebookTests(unittest.TestCase):
         self.assertTrue(all("同类练习" not in item["stem"] for item in items))
         self.assertEqual(
             practice_sheet.daily_group_heading(items[0]),
-            f"1　错题编号 {error_id}",
+            f"1　错题编号 {error_id}（第 1 阶段 · 今日到期）",
         )
         self.assertEqual(
             practice_sheet.daily_recommendation_heading(items[1]),

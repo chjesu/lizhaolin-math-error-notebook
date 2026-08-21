@@ -180,6 +180,9 @@ def load_daily_packet(
                 "daily_error_id": item["error_id"],
                 "daily_problem_text": item["problem_text"],
                 "daily_recommendation_index": included_for_error,
+                "daily_stage": int(item["stage"]),
+                "daily_due_date": item["due_date"],
+                "daily_overdue_days": int(item.get("overdue_days") or 0),
             })
             rows.append(record)
         if included_for_error == 0:
@@ -201,6 +204,9 @@ def load_daily_packet(
                 "daily_error_id": item["error_id"],
                 "daily_problem_text": item["problem_text"],
                 "daily_recommendation_index": 0,
+                "daily_stage": int(item["stage"]),
+                "daily_due_date": item["due_date"],
+                "daily_overdue_days": int(item.get("overdue_days") or 0),
             })
     conn.close()
     if not rows:
@@ -907,7 +913,12 @@ def identifier_label(question_id: str) -> str:
 
 def daily_group_heading(row: dict[str, Any]) -> str:
     """Fixed daily-review group heading: one main number per saved error."""
-    return f"{row['rank']}　错题编号 {row['daily_error_id']}"
+    overdue_days = int(row.get("daily_overdue_days") or 0)
+    timing = f"已逾期 {overdue_days} 天" if overdue_days else "今日到期"
+    return (
+        f"{row['rank']}　错题编号 {row['daily_error_id']}"
+        f"（第 {row['daily_stage']} 阶段 · {timing}）"
+    )
 
 
 def daily_recommendation_heading(row: dict[str, Any]) -> str:

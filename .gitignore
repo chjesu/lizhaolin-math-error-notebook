@@ -1,14 +1,15 @@
 # Runtime data and generated student artifacts
-data/math_notebook.db
-data/audits/
-data/imports/
-data/raw/
-data/images/
-data/backups/
+data/*
+!data/CANONICAL_QUESTION_BANK.md
 errors/
 practice/
 output/
+outputs/
 tmp/
+.tmp/
+tmp_*
+_tmp_*
+数学待判题/
 
 # Python/runtime caches
 __pycache__/

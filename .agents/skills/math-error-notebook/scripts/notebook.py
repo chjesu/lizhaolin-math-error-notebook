@@ -69,6 +69,13 @@ FEATURE_CODES = {
     "summation": "求和",
     "counting": "计数",
     "diagram-dependent": "依赖图形",
+    "focus-directrix": "焦点与准线",
+    "axis-orientation": "坐标轴方向判断",
+    "parameter-case-split": "参数分类讨论",
+    "norm-dot-product": "模长与数量积",
+    "reverse-solve": "逆向求参数或方程",
+    "sign-branches": "正负分支",
+    "point-on-curve": "曲线上点代入",
 }
 REVIEW_INTERVALS = (1, 2, 4, 7, 15, 30)
 SCHEMA_VERSION = 2
@@ -105,6 +112,17 @@ RECOMMENDATION_BLOCK_PATTERNS = (
     "答案待补",
     "待补充题干",
 )
+RECOMMENDATION_AUTO_TERMS = (
+    "离心率", "焦距", "焦点", "准线", "长轴", "短轴", "顶点", "原点",
+    "x轴", "y轴", "坐标轴", "距离", "垂直", "平行", "数量积", "模长", "向量", "正负", "分类讨论",
+    "取值范围", "参数", "相切", "切线", "轨迹", "最大值", "最小值",
+    "二倍角", "正弦", "余弦", "正切", "sin", "cos", "tan",
+    "抛物线", "椭圆", "双曲线", "圆", "方程",
+)
+RECOMMENDATION_MODES = ("auto", "same-level", "variation", "transfer")
+RECOMMENDATION_FORMAT_FEATURES = {
+    "single-choice", "multiple-choice", "fill-blank", "solution", "proof", "multi-part",
+}
 MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 WORKFLOW_STEPS: dict[str, tuple[str, ...]] = {
     "grade": ("photo_preflight", "model_review", "grade_preview", "grade_commit", "recommend"),
@@ -388,6 +406,41 @@ def infer_question_features(stem: str, question_type: str | None = None) -> list
     for code, terms in FEATURE_RULES:
         if any(term.casefold() in text for term in terms):
             features.add(code)
+    if "焦点" in text and "准线" in text:
+        features.add("focus-directrix")
+    compact_text = re.sub(r"[$\s{}]", "", text)
+    conic_marker = any(term in text for term in ("抛物线", "椭圆", "双曲线"))
+    if any(term in compact_text for term in ("焦点在x轴", "焦点在y轴", "长轴", "短轴")) or (
+        conic_marker and any(
+            pattern in compact_text
+            for pattern in ("x^2=", "x^{2}=", "y=", "y^2=", "y^{2}=", "x=")
+        )
+    ):
+        features.add("axis-orientation")
+    explicit_parameter_marker = bool(re.search(r"(?:参数|实数)\s*[a-zα-ω]", text))
+    conic_parameter_marker = conic_marker and (
+        explicit_parameter_marker or bool(re.search(r"\}\{[kmntλ]\}", text))
+    )
+    parameter_marker = explicit_parameter_marker or conic_parameter_marker
+    if parameter_marker and any(term in text for term in ("离心率", "焦点在", "取值范围", "分类讨论")):
+        features.add("parameter-case-split")
+    if conic_parameter_marker and any(term in text for term in ("离心率", "焦距", "焦点")):
+        features.update(("axis-orientation", "parameter-case-split", "reverse-solve"))
+    vector_marker = "向量" in text or "\\vec" in text
+    if vector_marker and any(term in text for term in ("垂直", "数量积", "内积", "\\cdot", "\\perp")) and any(
+        term in text for term in ("模", "长度", "|", "\\left|")
+    ):
+        features.add("norm-dot-product")
+    if "±" in text or "正负" in text:
+        features.add("sign-branches")
+    if re.search(r"(?:点|[a-z])[^。；\n]{0,20}在(?:抛物线|椭圆|双曲线)[^。；\n]{0,12}上", text) or re.search(
+        r"(?:抛物线|椭圆|双曲线)[^。；\n]{0,30}上的?一点", text
+    ):
+        features.add("point-on-curve")
+    if any(term in text for term in ("求参数", "求实数", "求方程", "方程为")) and any(
+        term in text for term in ("离心率", "焦点", "准线", "曲线上", "在抛物线", "在椭圆", "在双曲线")
+    ):
+        features.add("reverse-solve")
     return sorted(features)
 
 
@@ -771,6 +824,24 @@ def create_review_cycle(conn: sqlite3.Connection, error_id: str, base: date, cyc
         )
 
 
+def shift_remaining_review_stages(
+    conn: sqlite3.Connection, current: sqlite3.Row, completed_on: date
+) -> None:
+    """Anchor the rest of the current cycle to the actual completion date."""
+    current_due = date.fromisoformat(current["due_date"])
+    for row in conn.execute(
+        """SELECT id,due_date FROM review_schedule
+           WHERE error_id=? AND cycle=? AND stage>? AND completed_at IS NULL
+           ORDER BY stage""",
+        (current["error_id"], current["cycle"], current["stage"]),
+    ):
+        gap = date.fromisoformat(row["due_date"]) - current_due
+        conn.execute(
+            "UPDATE review_schedule SET due_date=? WHERE id=?",
+            ((completed_on + gap).isoformat(), row["id"]),
+        )
+
+
 def render_error_markdown(error_id: str, analysis: dict[str, Any], schedule: list[sqlite3.Row]) -> str:
     codes = analysis.get("knowledge_codes") or []
     evidence = analysis.get("evidence") or []
@@ -1105,14 +1176,102 @@ def normalize_recommendation_keywords(values: list[str] | None) -> list[str]:
     return tokens
 
 
-def recommendation_candidate_is_usable(row: sqlite3.Row) -> bool:
+def automatic_recommendation_keywords(problem_text: str) -> list[str]:
+    """Extract a short, auditable set of mathematical anchors from an error stem."""
+    text = (problem_text or "").casefold()
+    compact_text = re.sub(r"[$\s{}]", "", text)
+    has_parameter = bool(re.search(r"(?:参数|实数)\s*[a-zα-ω]", text))
+    def present(term: str) -> bool:
+        if term == "参数":
+            return term in text or has_parameter
+        if term == "圆":
+            return bool(re.search(r"(?<!椭)(?<!双)圆", text))
+        if term == "向量":
+            return term in text or "\\vec" in text
+        if term == "垂直":
+            return term in text or "\\perp" in text
+        if term == "模长":
+            return term in text or bool(re.search(r"\|\s*\\vec|\\left\|", text))
+        if term in ("x轴", "y轴", "坐标轴"):
+            return term in compact_text
+        return term.casefold() in text
+
+    return [term for term in RECOMMENDATION_AUTO_TERMS if present(term)][:8]
+
+
+def recommendation_keyword_matches(keyword: str, stem: str) -> bool:
+    text = (stem or "").casefold()
+    compact_text = re.sub(r"[$\s{}]", "", text)
+    if keyword == "向量":
+        return keyword in text or "\\vec" in text
+    if keyword == "垂直":
+        return keyword in text or "\\perp" in text
+    if keyword == "模长":
+        return keyword in text or bool(re.search(r"\|\s*\\vec|\\left\|", text))
+    if keyword in ("x轴", "y轴", "坐标轴"):
+        return keyword in compact_text
+    return keyword in text
+
+
+def normalized_recommendation_stem(value: str) -> str:
+    return re.sub(r"[\W_]+", "", (value or "").casefold(), flags=re.UNICODE)
+
+
+def contains_cjk(value: str) -> bool:
+    return bool(re.search(r"[\u3400-\u9fff]", value or ""))
+
+
+def recommendation_candidate_is_usable(
+    row: sqlite3.Row, target_stem: str | None = None
+) -> bool:
     """Reject obvious import placeholders before they reach a model review packet."""
     stem = (row["stem"] or "").strip()
     answer = (row["answer"] or "").strip()
     if len(stem) < 8 or not answer:
         return False
     searchable = f"{stem}\n{answer}".casefold()
-    return not any(pattern in searchable for pattern in RECOMMENDATION_BLOCK_PATTERNS)
+    if any(pattern in searchable for pattern in RECOMMENDATION_BLOCK_PATTERNS):
+        return False
+    if "�" in stem or ("[image]" in stem.casefold() and "![" not in stem):
+        return False
+    question_type = (row["question_type"] or "").casefold()
+    if "选择" in question_type and not row["options_json"] and re.search(r"(?:^|\s)A[.．、:]", stem):
+        return False
+    if target_stem:
+        if contains_cjk(target_stem) and not contains_cjk(stem):
+            return False
+        target_normalized = normalized_recommendation_stem(target_stem)
+        candidate_normalized = normalized_recommendation_stem(stem)
+        if target_normalized and target_normalized == candidate_normalized:
+            return False
+        if min(len(target_normalized), len(candidate_normalized)) >= 40:
+            similarity = difflib.SequenceMatcher(
+                None, target_normalized, candidate_normalized, autojunk=False
+            ).ratio()
+            if similarity >= 0.97:
+                return False
+    return True
+
+
+def resolve_recommendation_mode(
+    conn: sqlite3.Connection, error_id: str, requested: str = "auto"
+) -> str:
+    if requested not in RECOMMENDATION_MODES:
+        raise ValueError(f"unknown recommendation mode: {requested}")
+    if requested != "auto":
+        return requested
+    row = conn.execute(
+        """SELECT stage FROM review_schedule
+           WHERE error_id=? AND completed_at IS NULL
+           ORDER BY cycle DESC, stage ASC LIMIT 1""",
+        (error_id,),
+    ).fetchone()
+    stage = int(row["stage"]) if row else 3
+    if stage <= 2:
+        return "same-level"
+    if stage <= 4:
+        return "variation"
+    return "transfer"
 
 
 def question_feature_codes(
@@ -1192,13 +1351,17 @@ def recommend(
     replace: bool = False,
     full: bool = False,
     features: list[str] | None = None,
+    mode: str = "auto",
 ) -> list[dict[str, Any]]:
     error, codes = fetch_error(conn, error_id)
     if not codes:
         raise ValueError("error has no knowledge codes; tag it before requesting recommendations")
     keywords = normalize_recommendation_keywords(keywords)
+    if not keywords:
+        keywords = automatic_recommendation_keywords(error["problem_text"])
     text_ranks = fts_candidate_ranks(conn, keywords)
     target_features = error_feature_codes(error, features)
+    resolved_mode = resolve_recommendation_mode(conn, error_id, mode)
     if save and replace:
         conn.execute("DELETE FROM recommendations WHERE error_id=?", (error_id,))
     placeholders = ",".join("?" for _ in codes)
@@ -1219,28 +1382,51 @@ def recommend(
             GROUP BY q.id""",
         (error["cause_code"], *codes, error["question_id"], error_id),
     ))
-    rows = [row for row in rows if recommendation_candidate_is_usable(row)]
+    rows = [
+        row for row in rows
+        if recommendation_candidate_is_usable(row, error["problem_text"])
+    ]
     if not rows:
         return []
-    desired_offsets = (-0.6, -0.2, 0.0, 0.35, 0.8)
+    desired_offsets = {
+        "same-level": (-0.2, 0.0, 0.2, -0.4, 0.4),
+        "variation": (-0.4, 0.0, 0.4, -0.7, 0.7),
+        "transfer": (0.35, 0.6, 0.8, 0.2, 1.0),
+    }[resolved_mode]
+    feature_cache: dict[str, set[str]] = {}
+
+    def candidate_features(row: sqlite3.Row) -> set[str]:
+        if row["id"] not in feature_cache:
+            feature_cache[row["id"]] = set(question_feature_codes(
+                conn, row["id"], row["stem"], row["question_type"]
+            ))
+        return feature_cache[row["id"]]
+
+    def retrieval_score(row: sqlite3.Row) -> float:
+        stem = (row["stem"] or "").casefold()
+        keyword_score = 2.5 * sum(
+            recommendation_keyword_matches(keyword, stem) for keyword in keywords
+        )
+        matched = candidate_features(row).intersection(target_features)
+        feature_score = sum(
+            0.75 if feature in RECOMMENDATION_FORMAT_FEATURES else 4.0
+            for feature in matched
+        )
+        text_score = (
+            max(0.0, 3.0 - 0.01 * text_ranks.get(row["id"], 300))
+            if row["id"] in text_ranks else 0.0
+        )
+        return 5.0 * row["overlap"] + keyword_score + feature_score + text_score
+
+    pool_size = min(len(rows), max(50, limit * 10))
+    rows = sorted(rows, key=retrieval_score, reverse=True)[:pool_size]
     selected: list[dict[str, Any]] = []
     remaining = rows[:]
     for rank in range(1, min(limit, len(rows)) + 1):
         target = max(1.0, min(5.0, float(error["difficulty"]) + desired_offsets[(rank - 1) % len(desired_offsets)]))
         def score(row: sqlite3.Row) -> float:
             difficulty_score = max(0.0, 3.0 - abs(float(row["difficulty"]) - target))
-            stem = (row["stem"] or "").casefold()
-            keyword_score = 2.0 * sum(keyword in stem for keyword in keywords)
-            candidate_features = set(question_feature_codes(
-                conn, row["id"], row["stem"], row["question_type"]
-            ))
-            feature_score = 3.0 * len(candidate_features.intersection(target_features))
-            text_score = max(0.0, 2.0 - 0.01 * text_ranks.get(row["id"], 200)) if row["id"] in text_ranks else 0.0
-            return (
-                5.0 * row["overlap"] + 2.5 * row["cause_match"]
-                + difficulty_score + row["verified"] + keyword_score
-                + feature_score + text_score
-            )
+            return retrieval_score(row) + 2.5 * row["cause_match"] + difficulty_score + row["verified"]
         best = max(remaining, key=score)
         remaining.remove(best)
         matched_codes = [item[0] for item in conn.execute(
@@ -1250,17 +1436,23 @@ def recommend(
         reason_parts = [f"匹配知识点：{', '.join(matched_codes)}", f"目标难度 {target:.1f}，题目难度 {best['difficulty']:.1f}"]
         if best["cause_match"]:
             reason_parts.append(f"针对错因：{CAUSE_CODES[error['cause_code']]}")
-        matched_keywords = [keyword for keyword in keywords if keyword in (best["stem"] or "").casefold()]
+        matched_keywords = [
+            keyword for keyword in keywords
+            if recommendation_keyword_matches(keyword, best["stem"] or "")
+        ]
         if matched_keywords:
             reason_parts.append(f"题型关键词：{', '.join(matched_keywords)}")
         if best["id"] in text_ranks:
             reason_parts.append("全文检索：题干语义片段匹配")
-        matched_features = sorted(set(question_feature_codes(
-            conn, best["id"], best["stem"], best["question_type"]
-        )).intersection(target_features))
+        matched_features = sorted(candidate_features(best).intersection(target_features))
         if matched_features:
             labels = [FEATURE_CODES[code] for code in matched_features]
             reason_parts.append(f"结构特征：{', '.join(labels)}")
+        reason_parts.append({
+            "same-level": "复习目标：同难度巩固",
+            "variation": "复习目标：同考法变式",
+            "transfer": "复习目标：略难迁移",
+        }[resolved_mode])
         reason = "；".join(reason_parts)
         item = {
             "rank": rank,
@@ -1371,14 +1563,26 @@ def assign_recommendations(
 
 
 def review_due(conn: sqlite3.Connection, target: date) -> list[dict[str, Any]]:
-    return [dict(row) for row in conn.execute(
+    rows = [dict(row) for row in conn.execute(
         """SELECT rs.id AS review_id, rs.error_id, rs.cycle, rs.stage, rs.due_date,
                   e.problem_text, e.cause_code, e.difficulty
            FROM review_schedule rs JOIN errors e ON e.id=rs.error_id
            WHERE rs.completed_at IS NULL AND rs.due_date<=? AND e.status='active'
+             AND NOT EXISTS (
+                 SELECT 1 FROM review_schedule earlier
+                 WHERE earlier.error_id=rs.error_id AND earlier.completed_at IS NULL
+                   AND (earlier.cycle<rs.cycle OR
+                        (earlier.cycle=rs.cycle AND earlier.stage<rs.stage))
+             )
            ORDER BY rs.due_date, e.id""",
         (target.isoformat(),),
     )]
+    for row in rows:
+        row["overdue_days"] = max(
+            0, (target - date.fromisoformat(row["due_date"])).days
+        )
+        row["is_overdue"] = bool(row["overdue_days"])
+    return rows
 
 
 def daily_review_packet(
@@ -1398,38 +1602,12 @@ def daily_review_packet(
     slightly higher difficulty.  This keeps the daily automation deterministic
     while preserving the model-reviewed recommendation boundary.
     """
-    rows = conn.execute(
-        """SELECT e.id AS error_id, e.problem_text, e.cause_code, e.difficulty,
-                  MIN(rs.due_date) AS earliest_due, COUNT(*) AS due_stages,
-                  (SELECT rs2.id FROM review_schedule rs2
-                   WHERE rs2.error_id=e.id AND rs2.completed_at IS NULL
-                     AND rs2.due_date<=?
-                   ORDER BY rs2.due_date,rs2.cycle,rs2.stage LIMIT 1) AS review_id,
-                  (SELECT rs2.cycle FROM review_schedule rs2
-                   WHERE rs2.error_id=e.id AND rs2.completed_at IS NULL
-                     AND rs2.due_date<=?
-                   ORDER BY rs2.due_date,rs2.cycle,rs2.stage LIMIT 1) AS cycle,
-                  (SELECT rs2.stage FROM review_schedule rs2
-                   WHERE rs2.error_id=e.id AND rs2.completed_at IS NULL
-                     AND rs2.due_date<=?
-                   ORDER BY rs2.due_date,rs2.cycle,rs2.stage LIMIT 1) AS stage
-           FROM review_schedule rs
-           JOIN errors e ON e.id=rs.error_id
-           WHERE rs.completed_at IS NULL AND rs.due_date<=? AND e.status='active'
-           GROUP BY e.id
-           ORDER BY earliest_due, e.difficulty DESC, e.id""",
-        (
-            target.isoformat(),
-            target.isoformat(),
-            target.isoformat(),
-            target.isoformat(),
-        ),
-    ).fetchall()
+    rows = review_due(conn, target)
     items: list[dict[str, Any]] = []
     missing_recommendations: list[str] = []
     recommendation_shortfalls: list[dict[str, Any]] = []
     for row in rows:
-        overdue_days = max(0, (target - date.fromisoformat(row["earliest_due"])).days)
+        overdue_days = int(row["overdue_days"])
         stage = int(row["stage"])
         required_recommendations = 2 if stage <= 2 else 1
         recommendation_rows = conn.execute(
@@ -1437,7 +1615,7 @@ def daily_review_packet(
                       q.options_json,q.difficulty,q.source_name
                FROM recommendations r
                JOIN questions q ON q.id=r.question_id
-               WHERE r.error_id=? AND q.verified=1
+               WHERE r.error_id=? AND r.status='assigned' AND q.verified=1
                  AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.question_id=q.id)
                ORDER BY CASE WHEN r.status='assigned' THEN 0 ELSE 1 END,
                         r.rank,q.id""",
@@ -1492,10 +1670,11 @@ def daily_review_packet(
             "review_id": row["review_id"],
             "cycle": row["cycle"],
             "stage": stage,
-            "earliest_due": row["earliest_due"],
+            "due_date": row["due_date"],
+            "earliest_due": row["due_date"],
+            "is_overdue": row["is_overdue"],
             "overdue_days": overdue_days,
-            "due_stages": row["due_stages"],
-            "priority": round(overdue_days * 10 + row["due_stages"] * 2 + float(row["difficulty"]), 2),
+            "priority": round(overdue_days * 10 + float(row["difficulty"]), 2),
             "problem_text": row["problem_text"],
             "cause_code": row["cause_code"],
             "difficulty": row["difficulty"],
@@ -1504,8 +1683,7 @@ def daily_review_packet(
             "questions": recommendations,
             "question": recommendations[0] if recommendations else None,
         })
-    items.sort(key=lambda item: (-item["priority"], item["earliest_due"], item["error_id"]))
-    total_due_stages = sum(int(item["due_stages"]) for item in items)
+    items.sort(key=lambda item: (-item["priority"], item["due_date"], item["error_id"]))
     items = items[:max(1, limit)]
     selected_ids = {item["error_id"] for item in items}
     missing_recommendations = [item for item in missing_recommendations if item in selected_ids]
@@ -1529,8 +1707,9 @@ def daily_review_packet(
     out_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
     return {
         "date": target.isoformat(),
-        "due_stages": total_due_stages,
+        "due_reviews": len(rows),
         "due_errors": len(rows),
+        "overdue_errors": sum(bool(item["is_overdue"]) for item in rows),
         "selected_errors": len(items),
         "printable_questions": sum(len(item["questions"]) for item in items),
         "missing_reviewed_recommendations": missing_recommendations,
@@ -1659,7 +1838,9 @@ def mark_review(conn: sqlite3.Connection, error_id: str, result: str, note: str 
         "UPDATE review_schedule SET completed_at=?, result=?, note=? WHERE id=?",
         (now_iso(), result, note, current["id"]),
     )
-    if result in {"wrong", "partial"}:
+    if result == "correct":
+        shift_remaining_review_stages(conn, current, on_date)
+    else:
         conn.execute(
             "DELETE FROM review_schedule WHERE error_id=? AND completed_at IS NULL",
             (error_id,),
@@ -1743,9 +1924,6 @@ def correct_review(
             stage = int(current["stage"])
             if stage < 1 or stage > len(REVIEW_INTERVALS):
                 raise ValueError(f"unsupported review stage for correction: {stage}")
-            base_date = date.fromisoformat(current["due_date"]) - timedelta(
-                days=REVIEW_INTERVALS[stage - 1]
-            )
             for next_stage, days in enumerate(REVIEW_INTERVALS, start=1):
                 if next_stage <= stage:
                     continue
@@ -1755,7 +1933,10 @@ def correct_review(
                         error_id,
                         current["cycle"],
                         next_stage,
-                        (base_date + timedelta(days=days)).isoformat(),
+                        (
+                            on_date
+                            + timedelta(days=days - REVIEW_INTERVALS[stage - 1])
+                        ).isoformat(),
                     ),
                 )
         else:
@@ -1848,13 +2029,79 @@ def correct_attempt(conn: sqlite3.Connection, args: argparse.Namespace) -> dict[
     }
 
 
+def delete_attempt(conn: sqlite3.Connection, attempt_id: str) -> dict[str, Any]:
+    """Remove a row that was recorded even though no attempt was made."""
+    row = conn.execute(
+        "SELECT id,question_id,error_id,is_correct FROM attempts WHERE id=?",
+        (attempt_id,),
+    ).fetchone()
+    if not row:
+        raise ValueError(f"attempt not found: {attempt_id}")
+
+    conn.execute("DELETE FROM attempts WHERE id=?", (attempt_id,))
+    recommendation_status = None
+    if row["error_id"]:
+        latest = conn.execute(
+            """SELECT is_correct FROM attempts
+               WHERE error_id=? AND question_id=?
+               ORDER BY attempted_at DESC,id DESC LIMIT 1""",
+            (row["error_id"], row["question_id"]),
+        ).fetchone()
+        recommendation_status = (
+            "correct" if latest and latest["is_correct"] else "wrong" if latest else "assigned"
+        )
+        conn.execute(
+            "UPDATE recommendations SET status=? WHERE error_id=? AND question_id=?",
+            (recommendation_status, row["error_id"], row["question_id"]),
+        )
+    conn.commit()
+    return {
+        "attempt_id": attempt_id,
+        "question_id": row["question_id"],
+        "error_id": row["error_id"],
+        "deleted_result": "correct" if row["is_correct"] else "wrong",
+        "recommendation_status": recommendation_status,
+        "database_modified": True,
+    }
+
+
+def set_recommendation_status(
+    conn: sqlite3.Connection, error_id: str, question_id: str, status: str
+) -> dict[str, Any]:
+    if status not in ("assigned", "deferred"):
+        raise ValueError(f"unsupported recommendation status: {status}")
+    row = conn.execute(
+        "SELECT status FROM recommendations WHERE error_id=? AND question_id=?",
+        (error_id, question_id),
+    ).fetchone()
+    if not row:
+        raise ValueError(f"recommendation not found: {error_id}/{question_id}")
+    conn.execute(
+        "UPDATE recommendations SET status=? WHERE error_id=? AND question_id=?",
+        (status, error_id, question_id),
+    )
+    conn.commit()
+    return {
+        "error_id": error_id,
+        "question_id": question_id,
+        "previous_status": row["status"],
+        "status": status,
+        "database_modified": True,
+    }
+
+
 def stats(conn: sqlite3.Connection) -> dict[str, Any]:
     result: dict[str, Any] = {}
     result["questions"] = conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
     result["verified_questions"] = conn.execute("SELECT COUNT(*) FROM questions WHERE verified=1").fetchone()[0]
     result["errors"] = conn.execute("SELECT COUNT(*) FROM errors").fetchone()[0]
     result["active_errors"] = conn.execute("SELECT COUNT(*) FROM errors WHERE status='active'").fetchone()[0]
-    result["due_reviews"] = len(review_due(conn, date.today()))
+    due = review_due(conn, date.today())
+    result["due_reviews"] = len(due)
+    result["overdue_errors"] = sum(item["is_overdue"] for item in due)
+    result["max_overdue_days"] = max(
+        (item["overdue_days"] for item in due), default=0
+    )
     result["attempt_accuracy"] = conn.execute("SELECT ROUND(AVG(is_correct),3) FROM attempts").fetchone()[0]
     result["top_causes"] = [dict(row) for row in conn.execute(
         "SELECT cause_code, COUNT(*) AS count FROM errors GROUP BY cause_code ORDER BY count DESC LIMIT 5"
@@ -3143,7 +3390,8 @@ AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
     "recommend": {
         "commands": [
             "behavior-cases --category recommend --json",
-            "recommend-packet <error-id> --limit 3 --keyword <type> --feature <code> --out <packet.json> --json",
+            "recommend-packet <error-id> --limit 3 [--keyword <type>] [--feature <code>] --mode auto --out <packet.json> --json",
+            "recommend-eval <cases.json> --packets-dir <dir> --top-k 10 --json",
             "assign-recommendations <error-id> <packet.json> --save --json",
             "question <id> --json only for an ambiguous shortlisted item",
             "practice_sheet.py <error-id>",
@@ -3368,9 +3616,17 @@ def recommendation_packet(
     features: list[str] | None,
     out_path: Path,
     full: bool = False,
+    mode: str = "auto",
 ) -> dict[str, Any]:
+    error, _ = fetch_error(conn, error_id)
+    normalized_keywords = normalize_recommendation_keywords(keywords)
+    keyword_source = "explicit" if normalized_keywords else "automatic"
+    effective_keywords = normalized_keywords or automatic_recommendation_keywords(
+        error["problem_text"]
+    )
+    resolved_mode = resolve_recommendation_mode(conn, error_id, mode)
     items = recommend(
-        conn, error_id, limit, False, project_root, keywords, False, full, features
+        conn, error_id, limit, False, project_root, keywords, False, full, features, mode
     )
     packet = {
         "schema": "math-recommendation-review-packet/v1",
@@ -3378,6 +3634,13 @@ def recommendation_packet(
         "generated_at": now_iso(),
         "review_required": True,
         "content_mode": "full" if full else "compact",
+        "retrieval": {
+            "keyword_source": keyword_source,
+            "keywords": effective_keywords,
+            "feature_codes": error_feature_codes(error, features),
+            "mode": resolved_mode,
+            "strategy": "verified_filters_then_local_recall_then_stage_ranking",
+        },
         "review_hint": (
             "Review stem, options, source, difficulty, and reason locally. "
             "Use `question <id> --json` only for an ambiguous shortlisted item."
@@ -3393,7 +3656,57 @@ def recommendation_packet(
         "packet": str(out_path.resolve()),
         "question_ids": [item["question_id"] for item in items],
         "content_mode": packet["content_mode"],
+        "retrieval": packet["retrieval"],
         "payload_characters": len(json.dumps(packet, ensure_ascii=False, separators=(",", ":"))),
+        "database_modified": False,
+    }
+
+
+def evaluate_recommendation_packets(
+    cases_path: Path, packets_dir: Path, top_k: int = 10
+) -> dict[str, Any]:
+    payload = json.loads(cases_path.read_text(encoding="utf-8"))
+    if payload.get("schema") != "math-recommendation-eval/v1":
+        raise ValueError("unsupported recommendation evaluation schema")
+    cases = payload.get("cases") or []
+    if not cases:
+        raise ValueError("recommendation evaluation requires at least one case")
+    details: list[dict[str, Any]] = []
+    hit_at_3 = 0
+    recall_at_k = 0
+    for case in cases:
+        error_id = str(case.get("error_id") or "").strip()
+        accepted = {str(item) for item in case.get("accepted_question_ids") or []}
+        if not error_id or not accepted:
+            raise ValueError("each recommendation evaluation case needs error_id and accepted_question_ids")
+        packet_path = packets_dir / f"{error_id}.json"
+        if not packet_path.exists():
+            raise ValueError(f"missing recommendation packet: {packet_path}")
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        ranked = [str(item.get("question_id")) for item in packet.get("items") or []]
+        first_rank = next(
+            (index for index, question_id in enumerate(ranked, 1) if question_id in accepted),
+            None,
+        )
+        top3_hit = first_rank is not None and first_rank <= 3
+        topk_hit = first_rank is not None and first_rank <= top_k
+        hit_at_3 += int(top3_hit)
+        recall_at_k += int(topk_hit)
+        details.append({
+            "error_id": error_id,
+            "first_accepted_rank": first_rank,
+            "hit_at_3": top3_hit,
+            f"recall_at_{top_k}": topk_hit,
+        })
+    count = len(details)
+    return {
+        "schema": "math-recommendation-eval-result/v1",
+        "cases": count,
+        "hit_at_3": hit_at_3,
+        "hit_at_3_rate": round(hit_at_3 / count, 4),
+        f"recall_at_{top_k}": recall_at_k,
+        f"recall_at_{top_k}_rate": round(recall_at_k / count, 4),
+        "details": details,
         "database_modified": False,
     }
 
@@ -3566,6 +3879,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--replace", action="store_true", help="replace saved recommendations for this error")
     p.add_argument("--keyword", action="append", help="boost questions containing this type keyword")
     p.add_argument("--feature", action="append", choices=tuple(FEATURE_CODES), help="match an audited structural feature")
+    p.add_argument("--mode", choices=RECOMMENDATION_MODES, default="auto", help="difficulty and transfer target; auto follows the next review stage")
     p.add_argument("--full", action="store_true", help="include answers, solutions, and source URL")
     p.add_argument("--project-root", type=Path, default=Path.cwd())
     p.add_argument("--json", action="store_true")
@@ -3575,9 +3889,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=5)
     p.add_argument("--keyword", action="append")
     p.add_argument("--feature", action="append", choices=tuple(FEATURE_CODES))
+    p.add_argument("--mode", choices=RECOMMENDATION_MODES, default="auto")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--full", action="store_true", help="include answers and solutions only when needed")
     p.add_argument("--project-root", type=Path, default=Path.cwd())
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("recommend-eval", help="evaluate reviewed recommendation packets")
+    p.add_argument("cases", type=Path, help="math-recommendation-eval/v1 JSON")
+    p.add_argument("--packets-dir", type=Path, required=True)
+    p.add_argument("--top-k", type=int, default=10)
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("assign-recommendations", help="replace recommendations with a reviewed verified set")
@@ -3635,6 +3956,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--answer")
     p.add_argument("--cause-code", choices=tuple(CAUSE_CODES))
     p.add_argument("--note")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("delete-attempt", help="remove a row recorded when no attempt was made")
+    p.add_argument("attempt_id")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("recommendation-status", help="defer or resume an assigned recommendation")
+    p.add_argument("error_id")
+    p.add_argument("question_id")
+    p.add_argument("--status", choices=("assigned", "deferred"), required=True)
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("search", help="search question bank")
@@ -3925,11 +4256,16 @@ def main(argv: list[str] | None = None) -> int:
                 payload = recommend(
                     conn, args.error_id, max(1, min(args.limit, 10)), args.save,
                     args.project_root, args.keyword, args.replace, args.full, args.feature,
+                    args.mode,
                 )
             elif args.command == "recommend-packet":
                 payload = recommendation_packet(
                     conn, args.error_id, max(1, min(args.limit, 10)), args.project_root,
-                    args.keyword, args.feature, args.out, args.full,
+                    args.keyword, args.feature, args.out, args.full, args.mode,
+                )
+            elif args.command == "recommend-eval":
+                payload = evaluate_recommendation_packets(
+                    args.cases, args.packets_dir, max(1, min(args.top_k, 100))
                 )
             elif args.command == "assign-recommendations":
                 plan = json.loads(args.plan.read_text(encoding="utf-8"))
@@ -3957,6 +4293,12 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "correct-attempt":
                 args.correct = not args.wrong
                 payload = correct_attempt(conn, args)
+            elif args.command == "delete-attempt":
+                payload = delete_attempt(conn, args.attempt_id)
+            elif args.command == "recommendation-status":
+                payload = set_recommendation_status(
+                    conn, args.error_id, args.question_id, args.status
+                )
             elif args.command == "search":
                 payload = search_questions(conn, args)
             elif args.command == "sources":

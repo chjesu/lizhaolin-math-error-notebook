@@ -1,0 +1,48 @@
+{
+  "schema": "math-recommendation-eval/v1",
+  "reviewed_at": "2026-08-16",
+  "cases": [
+    {
+      "error_id": "ERR-20260724-9657ca83",
+      "accepted_question_ids": [
+        "Q-52e09577833c",
+        "Q-0079cd61d38a",
+        "Q-2bf278ac3f6c",
+        "Q-d14fcadb4db8"
+      ]
+    },
+    {
+      "error_id": "ERR-20260722-15381503",
+      "accepted_question_ids": ["Q-9c4a9ba64e05", "Q-0a0ef27060ab"]
+    },
+    {
+      "error_id": "ERR-20260722-3010048a",
+      "accepted_question_ids": ["Q-9c4a9ba64e05", "Q-0a0ef27060ab"]
+    },
+    {
+      "error_id": "ERR-20260726-91b97a00",
+      "accepted_question_ids": [
+        "Q-19bf5cd661fd",
+        "Q-0520657209a8",
+        "Q-41e03dd640df"
+      ]
+    },
+    {
+      "error_id": "ERR-20260724-29d6c774",
+      "accepted_question_ids": [
+        "Q-2d8ba9c5c81e",
+        "Q-a08264e08d2b",
+        "Q-b3f67aba358c",
+        "Q-6978d4dba01d"
+      ]
+    },
+    {
+      "error_id": "ERR-20260724-960abd60",
+      "accepted_question_ids": [
+        "Q-9dd49e7ef4d9",
+        "Q-52e09577833c",
+        "Q-d14fcadb4db8"
+      ]
+    }
+  ]
+}

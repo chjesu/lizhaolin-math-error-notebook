@@ -149,16 +149,19 @@ Skill 只有一个安装包：`.agents/skills/math-error-notebook`。Codex CLI �
 | 错题保存 | `record-error` | 保存结构化错因、图片、知识点和复习周期 |
 | 错题预检/保存 | `grade-preview` / `grade-commit` | 写库前验证错因 JSON；粗心必须有直接证据；提交复用同一质量门 |
 | 错题撤销 | `delete-error` | 删除误保存的错题及受控派生文件；有历史作答时须显式 `--detach-attempts`，保留作答但解除错题关联 |
-| 推荐预览/保存 | `recommend` | 按知识点、错因、难度、作答史、关键词和结构特征排序已验证题 |
-| 推荐审核包 | `recommend-packet` | 本地完成关键词拆分、占位题过滤和排序，默认写入不含答案/长解析的精简审核包；同一审核包复核后可直接交给 `assign-recommendations` |
+| 推荐预览/保存 | `recommend` | 按知识点、错因、难度、作答史、自动/显式判别词和细粒度考法特征排序已验证题；`--mode auto` 按复习阶段选择同难度、变式或迁移目标 |
+| 推荐审核包 | `recommend-packet` | 两阶段本地召回与排序，过滤近重复、明显乱码、语言错配和不完整选择题，默认写入不含答案/长解析的精简审核包；同一审核包复核后可直接交给 `assign-recommendations` |
+| 推荐评测 | `recommend-eval` | 对人工复核的 `math-recommendation-eval/v1` 案例和候选包计算 Hit@3、Recall@K；只读、不改主库 |
 | 人工推荐 | `assign-recommendations` | 用模型逐题复核后的已验证题替换自动候选 |
-| 复习到期 | `due` | 查询到期或逾期复习任务 |
-| 每日复习包 | `daily-review-packet` | 每个活动错题合并为一个任务；阶段1–2带2道同难度推荐，阶段3–4带1道变式，阶段5–6带1道优先略难迁移题；只使用已复核且已验证题 |
+| 复习到期 | `due` | 每个活动错题只返回一个当前可执行阶段；逾期按天数显示，不累计后续阶段任务 |
+| 每日复习包 | `daily-review-packet` | 每个活动错题只暴露一个当前可执行阶段；阶段1–2带2道同难度推荐，阶段3–4带1道变式，阶段5–6带1道优先略难迁移题；只使用已复核且已验证题 |
 | 复习反馈 | `review` | 记录 correct/partial/wrong，并在失败时启动新周期 |
 | 掌握确认 | `master-error` | 用户明确确认已掌握时，保留已完成复习历史并取消尚未发生的后续阶段 |
 | 复习更正 | `correct-review` | 原位更正最近一次误判，并恢复或重建对应复习周期；不重复推进阶段 |
 | 作答记录 | `attempt` | 保存推荐题对错、答案和新的错因 |
 | 作答更正 | `correct-attempt` | 原位更正误判的 attempt，并同步推荐状态；不重复计数 |
+| 作答撤销 | `delete-attempt` | 删除“实际未作答”却被误记的 attempt，并恢复该推荐题的最近历史状态或待作答状态 |
+| 推荐暂缓/恢复 | `recommendation-status` | 将未学内容保留在推荐历史中并标为 `deferred`，每日复习不入卷；学完后恢复为 `assigned` |
 | 检索 | `search` | 按知识点、年级、难度、文本、验证状态精简检索；适合的文本查询自动使用主库内 FTS5 |
 | 检索维护 | `rebuild-search-index` | 先备份唯一主库，再在同一 SQLite 内重建 FTS5 trigram 索引与同步触发器 |
 | 单题详情 | `question` | 按 ID 读取题目；照片判题优先用 `--compact` 省略长解析和非必要元数据，确有需要才读完整题目；`--raw` 才读取原始导入记录 |
@@ -185,8 +188,8 @@ Skill 只有一个安装包：`.agents/skills/math-error-notebook`。Codex CLI �
 - 数据库与标识：`default_database_path`、`connect`、`init_database`、`fingerprint`、`slug_id`、`bank_info`
 - 题目标准化：`infer_knowledge`、`infer_question_features`、`validate_feature_codes`、`normalize_difficulty`、`normalize_question`、`insert_question`
 - 导入与来源：`import_records`、`read_json_records`、`fetch_json`、`register_exam_directory`、`sync_source_manifest`、`update_source_metadata`、`list_sources`
-- 错题与复习：`create_review_cycle`、`render_error_markdown`、`validate_error_analysis`、`record_error`、`fetch_error`、`delete_error`、`review_due`、`daily_review_packet`、`mark_review`、`correct_review`、`record_attempt`
-- 推荐：`compact_recommendations`、`question_feature_codes`、`backfill_question_features`、`error_feature_codes`、`recommend`、`recommendation_packet`、`assign_recommendations`
+- 错题与复习：`create_review_cycle`、`render_error_markdown`、`validate_error_analysis`、`record_error`、`fetch_error`、`delete_error`、`review_due`、`daily_review_packet`、`mark_review`、`correct_review`、`record_attempt`、`correct_attempt`、`delete_attempt`、`set_recommendation_status`
+- 推荐：`automatic_recommendation_keywords`、`recommendation_candidate_is_usable`、`resolve_recommendation_mode`、`compact_recommendations`、`question_feature_codes`、`backfill_question_features`、`error_feature_codes`、`recommend`、`recommendation_packet`、`evaluate_recommendation_packets`、`assign_recommendations`
 - 检索与统计：`stats`、`coverage`、`list_knowledge_points`、`list_cause_codes`、`list_feature_codes`、`question_detail`、`search_questions`、`search_index_status`、`rebuild_search_index`
 - 审核与修复：`annotate_question`、`question_issue_codes`、`near_duplicate_candidates`、`audit_item`、`prepare_audit_batch`、`prepare_verification_reviews`、`apply_verification_review`、`apply_verification_review_batch`、`repair_embedded_options`、`audit_queue`、`audit_summary`
 - 启动与交接：`doctor`、`agent_context`、`handoff_snapshot`、`behavior_cases`、`workflow_start/update/status`、`_git_summary`
@@ -382,7 +385,7 @@ PowerShell 读取项目文本必须显式使用 `Get-Content -Encoding UTF8`，P
 
 - 判题：`photo-preflight --task grade（本地仅尺寸控制） → 远端视觉模型打开全部 preview_paths → question --compact（题号可见时） → grade-preview → grade-commit`；不得在常规流程中启动 OCR/本地 Qwen，也不得整包读取 `ocr-packet.json`
 - 推荐：`recommend-packet --limit 3 → 模型只复核精简题干 → assign-recommendations <同一packet>`；仅对个别疑难候选调用 `question <id>`，不再默认加载全部答案与长解析
-- 每日复习：`daily-review-packet → 补齐缺少的已复核推荐 → practice_sheet.py --daily-packet`；积压阶段不再重复变成多份任务
+- 每日复习：`daily-review-packet → 补齐缺少的已复核推荐 → practice_sheet.py --daily-packet`；每题只暴露一个当前阶段，积压只增加 `overdue_days`，完成后按实际完成日顺延后续阶段
 - 批量 DOCX：`import_recent_docx_batch.py → audit_recent_docx_batch.py`
 - 验证：`audit-summary → audit-queue/prepare-audit-batch [--simplified-only] → 模型输出携带 packet_sha256 的精简决策 → prepare-review-batch（首次快照校验） → verify-review-batch（写库前再次校验）`
 - 长任务：`workflow-start → workflow-update → workflow-status`，断线或更换模型后从未完成步骤继续

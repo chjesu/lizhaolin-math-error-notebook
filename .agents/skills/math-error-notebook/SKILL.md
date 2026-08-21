@@ -134,10 +134,25 @@ python -B <skill-dir>\scripts\notebook.py recommend-packet <error-id> --feature 
 python -B <skill-dir>\scripts\notebook.py assign-recommendations <error-id> <packet.json> --save --json
 ```
 
+- When `--keyword` is omitted, the authoritative recommender extracts a short,
+  auditable set of mathematical anchors from the error stem and combines SQLite
+  FTS5 recall with fine-grained operation features. `--mode auto` is the default:
+  pending stages 1-2 target `same-level`, stages 3-4 target `variation`, and
+  stages 5-6 target `transfer`. Override the mode only for an explicitly reviewed
+  recommendation task.
+- Candidate generation is two-stage: verified/unattempted/same-knowledge recall,
+  then stage-aware ranking by mathematical anchors, operation features, cause,
+  and difficulty. Question-format features such as fill-blank or single-choice
+  are deliberately weaker than mathematical-operation features. Exact/near
+  duplicates, obvious placeholders, unresolved image markers, malformed choices,
+  and Chinese/English language mismatches are removed before model review.
 - Default output and recommendation packets hide answers/solutions. Ranking, keyword tokenization, obvious placeholder rejection, difficulty progression, knowledge, cause, attempt history, and audited structural features run locally. Review the compact packet for relevance, then pass that same packet to `assign-recommendations`; do not create a second plan file. Use `question <id> --json` only for an ambiguous shortlisted item, or `recommend-packet --full` only when complete solutions are genuinely needed.
 - Questions with any recorded practice attempt are excluded from recommendation candidates.
 - If automatic matches are weak, save a reviewed verified set with `assign-recommendations`; never substitute invented questions silently.
 - If fewer than three verified matches exist, report the shortfall and offer adjacent-topic search or generated questions labeled unverified.
+- Measure ranking changes against a reviewed `math-recommendation-eval/v1` case
+  file with `recommend-eval <cases.json> --packets-dir <dir> --top-k 10 --json`.
+  Report both Hit@3 and Recall@10; evaluation never writes the database.
 - After saving, create the A4 PDF (questions only by default; add `--with-answers` when the user wants an answer page) and print only when the user asks:
 
 ```powershell
@@ -157,6 +172,14 @@ Printer/output preferences live in `config/math-error-notebook.json`. The script
 After grading practice, record it with `attempt <question-id> --error-id <error-id> --correct|--wrong`; include `--cause-code` when wrong, then adapt recommendations.
 If a previously recorded attempt was misgraded, correct that same row with
 `correct-attempt <attempt-id> --correct|--wrong`; do not add a second attempt.
+If the student did not attempt the material at all (for example, it has not been
+learned yet), use `delete-attempt <attempt-id>` to remove the mistaken row rather
+than counting it as wrong or correct; the linked recommendation returns to its
+prior attempt state, or to `assigned` when no earlier attempt exists.
+For material not yet learned, then use
+`recommendation-status <error-id> <question-id> --status deferred`; deferred
+items stay in recommendation history but are excluded from daily packets and
+automatic re-recommendation. Change the status back to `assigned` after learning.
 
 ## Import and verify
 
@@ -164,7 +187,7 @@ Read `references/import-and-verification.md` only for question import, source re
 
 ## Review and progress
 
-Use `daily-review-packet --limit 12 --out <packet.json> --json` to collapse accumulated schedules into one task per active error. Stages 1-2 include the original plus two same-level reviewed recommendations, stages 3-4 include the original plus one reviewed variation, and stages 5-6 include the original plus one reviewed recommendation with a preference for slightly higher difficulty. Only saved, reviewed, verified recommendations enter its printable section; resolve any reported recommendation gaps before PDF generation. Generate one questions-only review PDF with `practice_sheet.py --daily-packet <packet.json>`. Its layout is fixed: main numbers count error groups, each group starts with `错题编号` and `错题回顾`, and its nested exercises are labeled `同类型推荐题 1/2` with `题库编号`, difficulty, recommendation reason, and source in stable positions. A second recommendation never consumes another main number; the next main number begins only at the next error group. Do not replace this hierarchy with flat per-question numbering. Use `due --json`, `review <error-id> --result correct|partial|wrong`, `stats --json`, and `coverage --json`. Wrong/partial review starts an adaptive cycle. If the latest review itself was misgraded, use `correct-review <error-id> --result correct|partial|wrong`; it corrects that row and repairs the schedule instead of advancing a second stage. When the user explicitly confirms an error is mastered, use `master-error <error-id> --json` to retain completed review history while cancelling only its pending stages.
+Use `daily-review-packet --limit 12 --out <packet.json> --json` to expose at most one actionable stage per active error. Later planned stages never count as additional backlog: an overdue error remains one task with `overdue_days`, and completing its current stage shifts the rest of that cycle from the actual completion date. Stages 1-2 include the original plus two same-level reviewed recommendations, stages 3-4 include the original plus one reviewed variation, and stages 5-6 include the original plus one reviewed recommendation with a preference for slightly higher difficulty. Only saved, reviewed, verified recommendations enter its printable section; resolve any reported recommendation gaps before PDF generation. Generate one questions-only review PDF with `practice_sheet.py --daily-packet <packet.json>`. Its layout is fixed: main numbers count error groups, each group heading shows `错题编号`, current stage, and overdue state before `错题回顾`; nested exercises are labeled `同类型推荐题 1/2` with `题库编号`, difficulty, recommendation reason, and source in stable positions. A second recommendation never consumes another main number; the next main number begins only at the next error group. Do not replace this hierarchy with flat per-question numbering. Use `due --json`, `review <error-id> --result correct|partial|wrong`, `stats --json`, and `coverage --json`. Wrong/partial review starts an adaptive cycle. If the latest review itself was misgraded, use `correct-review <error-id> --result correct|partial|wrong`; it corrects that row and repairs the schedule instead of advancing a second stage. When the user explicitly confirms an error is mastered, use `master-error <error-id> --json` to retain completed review history while cancelling only its pending stages.
 
 ## Local full-text retrieval
 

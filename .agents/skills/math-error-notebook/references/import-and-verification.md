@@ -60,7 +60,7 @@ independent answer and derivation. Simplified-mode items may use a concise revie
 answer and consistency basis instead of repeating a full re-solve, but must not merely
 copy the stored long solution. The expander only copies deterministic question
 metadata and creates canonical review files; it never changes the database. Every
-decision must carry the originating audit packet's `packet_sha256` (the Harness worker
+decision must carry the originating audit packet's `packet_sha256` (the model reviewer
 copies it automatically). The expander and the final verifier both reject a missing or
 stale hash, so a concurrent edit or another agent's verification requires a fresh audit.
 Review, decision, and batch-manifest JSON may be UTF-8 with or without a BOM.

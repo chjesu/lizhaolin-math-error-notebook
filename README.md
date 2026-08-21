@@ -84,7 +84,7 @@ flowchart LR
 - 不是绕过版权、登录、付费墙或访问限制的试题抓取器；
 - 不是让 OCR 或大模型直接决定题库真实性的黑箱系统。
 
-项目提供两个二选一的 Skill 安装包：纯 Codex 版和 Codex + Harness 省 Token 版。两者共用同一套数据规范、验证门槛和命令行入口，避免重复创建题库、推荐器或审核流程。
+项目只提供一个 `math-error-notebook` Skill 安装包，由 Codex CLI 按任务在 Luna、Terra 和 Sol 之间自动路由；所有模型共用同一套数据规范、验证门槛和命令行入口。
 
 ## 核心能力
 
@@ -96,7 +96,7 @@ flowchart LR
 - **复习闭环**：记录作答结果、复习日期、薄弱知识点和重复错因，生成每日复习任务。
 - **试卷入库**：导入用户授权的 DOCX、PDF 及结构化题目，经过质量门和逐题审核后进入主库。
 - **低 Token 工作流**：图片尺寸控制、批量审核包、结构化决策扩展和 SymPy 预检均由本地脚本完成；远端只接收适合判读的标准化预览。
-- **可控的 DeepSeek Harness（省 Token 版）**：可把文字判题分析、文本题审核候选、推荐复核和标签建议交给 DeepSeek；本地程序校验输入、ID、标签和置信度，DeepSeek 不直接写题库。
+- **Codex CLI 模型路由**：Luna 处理高吞吐任务，Terra 处理日常判题和辅导，Sol 处理完整推导、修复及争议裁决；模型不直接写题库。
 
 ## 工作流程
 
@@ -148,62 +148,22 @@ PaddleOCR 公式识别为可选能力：
 python -X utf8 -B -m pip install -r requirements-paddleocr.txt
 ```
 
-只有 Codex + Harness 省 Token 版需要 DeepSeek 客户端。依赖隔离安装到项目运行目录：
-
-```powershell
-python -X utf8 -B -m pip install --target .runtime\deepseek `
-  -r skill-packages\math-error-notebook-harness\scripts\requirements-deepseek.txt
-```
-
-API Key 仅通过 `DEEPSEEK_API_KEY` 环境变量读取，不写入仓库或候选文件。
-
 ### Codex CLI 自动模型路由
 
-纯 Codex 版可按任务自动选择模型：Luna 处理高吞吐标签、推荐和简化审核，Terra
+唯一版本可按任务自动选择模型：Luna 处理高吞吐标签、推荐和简化审核，Terra
 处理日常判题与教学引导，Sol 处理完整推导、题目修复和争议裁决。模型始终运行在
 只读沙箱，输出受 JSON Schema 约束，正式写库仍经过原有质量门。
 
 ```powershell
-python -X utf8 -B scripts\codex_task_router.py install-profiles --json
-python -X utf8 -B scripts\codex_task_router.py route --task grade-photo --has-image --json
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\codex_task_router.py install-profiles --json
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\codex_task_router.py route --task grade-photo --has-image --json
 ```
 
 完整任务表、风险升级规则和运行示例见 [`MODEL_ROUTING.md`](MODEL_ROUTING.md)。
 
 ## 快速开始
 
-### 选择安装包
-
-两个安装包功能基线一致，只能二选一安装：
-
-| 安装包 | 适合场景 | 模型分工 | 额外配置 |
-|---|---|---|---|
-| **纯 Codex 版** `math-error-notebook` | 希望配置最少、全部由 Codex 完成 | Codex 负责视觉、数学判断、审核、推荐与最终写入复核 | 无 |
-| **Codex + Harness 省 Token 版** `math-error-notebook-harness` | 已有 DeepSeek API，希望减少 Codex 的文字推理消耗 | DeepSeek 处理受限的文字判题、文本审核、推荐复核和标签候选；Codex 负责看图、疑难升级和最终写入复核 | `DEEPSEEK_API_KEY` 与隔离客户端 |
-
-两版都只通过 `notebook.py` 访问唯一主库；Harness 永远不直接写数据库。照片、图形、歧义内容、低置信度结果和正式提交仍交给 Codex。不要同时安装两版，以免同一请求触发两个 Skill。
-
-#### 2026-08-15 同包审核实测
-
-在同一台电脑、同一长会话和同一份 4 道纯文本数学题审核包上，两版逐题结论完全一致，均为 `4/4` 通过；测试只生成候选和运行本地质量门，没有写入生产题库。
-
-| 指标 | 纯 Codex 版 | Codex + Harness 省 Token 版 |
-|---|---:|---:|
-| ChatGPT 输入 Token | 404,950（缓存 397,568） | 103,746（缓存 102,016） |
-| ChatGPT 输出 Token | 3,470 | 625 |
-| DeepSeek Token | 0 | 输入 4,135；输出 1,559 |
-| 端到端时间 | 约 114 秒 | 26.7 秒（Worker 17.81 秒） |
-| 实际新增 API 费用 | $0（Codex 订阅额度） | DeepSeek 约 $0.00316 |
-| 按 API 单价折算的总成本 | 约 $0.3398 | 约 $0.0816 |
-| 审核结果 | 4/4 通过 | 4/4 通过，与纯 Codex 一致 |
-
-本次实测中，省 Token 版将 ChatGPT Token 减少约 **74.4%**，API 等价成本减少约 **76.0%**，端到端速度约提升 **4.3 倍**。审核包生成和结构预检是两版共用的本地确定性流程，耗时 2.23 秒，模型 Token 和费用均为 0。
-
-成功的 Harness 数据使用 `deepseek-v4-pro --thinking off`。默认 `thinking=auto` 的对照调用约 70 秒后没有返回 JSON 正文，因此未计入成功结果；对高质量简化审核包可关闭显式 thinking，疑难、矛盾或低置信度项目仍应升级给 Codex。绝对 Token 会随会话长度和缓存状态变化，尤其纯 Codex 长会话会携带较大的缓存上下文；这组数据用于说明当前项目真实工作流中的相对差异，不代表固定配额。
-
-API 等价成本按测试日官方价格计算：[GPT-5.6 Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol) 和 [DeepSeek API Pricing](https://api-docs.deepseek.com/quick_start/pricing)。Codex 订阅不会按表中的 OpenAI API 等价价格另行扣费。
-
-#### 安装纯 Codex 版
+### 安装 Skill
 
 在 Codex 中输入下面这句话即可从 GitHub 安装：
 
@@ -211,19 +171,7 @@ API 等价成本按测试日官方价格计算：[GPT-5.6 Sol](https://developer
 使用 $skill-installer 安装 https://github.com/chjesu/lizhaolin-math-error-notebook/tree/master/.agents/skills/math-error-notebook
 ```
 
-#### 安装 Codex + Harness 省 Token 版
-
-```text
-使用 $skill-installer 安装 https://github.com/chjesu/lizhaolin-math-error-notebook/tree/master/skill-packages/math-error-notebook-harness
-```
-
-安装后设置 `DEEPSEEK_API_KEY`，并按上方命令把依赖安装到项目的 `.runtime\deepseek`。首次连接可直接说：
-
-```text
-使用 $math-error-notebook-harness 检查并连接当前项目；适合的文字任务交给 DeepSeek Harness，看图、疑难项和最终写入由 Codex 处理。
-```
-
-安装任一版本后重启 Codex。Skill 会优先连接环境变量
+安装后重启 Codex。Skill 会优先连接环境变量
 `LIZHAOLIN_MATH_NOTEBOOK_ROOT` 指定的项目；未设置时，从当前工作目录向上寻找
 `data/math_notebook.db`。因此，使用本项目现有题库时应先在 Codex 中打开本仓库目录。
 生产题库、学生照片和学习记录不会随 GitHub Skill 分发；在新目录首次建立空白错题本时，才运行 `init` 和 `seed`。
@@ -322,41 +270,11 @@ python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py audit-i
 python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py verify-item <题目ID> <审核JSON> --json
 ```
 
-### 将文本任务下放给 DeepSeek Harness（仅省 Token 版）
-
-```powershell
-# 文字作答或已由视觉模型完成可信转录的判题证据；JSON 必须声明 student_work_has_steps
-python -X utf8 -B skill-packages\math-error-notebook-harness\scripts\deepseek_worker.py `
-  <证据JSON> --task grade --out <判题候选JSON>
-
-# 审核包：含图题、低置信度和矛盾项会自动交回 Codex
-python -X utf8 -B skill-packages\math-error-notebook-harness\scripts\deepseek_worker.py `
-  <审核manifest.json> --task verify --out <精简决策JSON>
-
-# 只允许从 recommend-packet 提供的已验证候选中选择
-python -X utf8 -B skill-packages\math-error-notebook-harness\scripts\deepseek_worker.py `
-  <推荐审核包JSON> --task recommend --out <已复核推荐JSON>
-
-# 仅产生标签候选，不修改题目
-python -X utf8 -B skill-packages\math-error-notebook-harness\scripts\deepseek_worker.py `
-  <题目JSON> --task tag --out <标签候选JSON>
-```
-
-该入口始终返回 `database_modified=false`。输出中的 `next_command` 只是后续
-人工/Codex 复核提示；正式写入仍须通过 `grade-commit`、
-`verify-review-batch`、`assign-recommendations` 或 `annotate` 的权威质量门。
-DeepSeek 无视觉输入时不得判读照片，含图审核也会自动升级给具备视觉能力的模型。
-选择并调用省 Token 版即表示长期授权把题干、选项、答案、解析、标签和可信文字转录
-发送到 DeepSeek 官方接口；后续批次不再逐次确认。工作器会静默拒绝非官方端点，发送前
-删除本地路径、密钥和机器信息，并在 `data/audits/deepseek-send-audit.jsonl` 记录不含
-题目正文的时间、任务、模型、题数、字符数和载荷 SHA256。
-
 ## 目录结构
 
 ```text
 .
-├─ .agents/skills/math-error-notebook/  # 项目 Skill、权威 CLI、模板与数据规范
-├─ skill-packages/math-error-notebook-harness/ # 可单独安装的 Codex + Harness 省 Token 版
+├─ .agents/skills/math-error-notebook/  # 唯一安装包、权威 CLI、模板与数据规范
 ├─ assets/branding/                     # Logo、图标和品牌资源
 ├─ config/                              # 项目配置
 ├─ data/                                # 本地主库、导入与审核数据（大部分不提交 Git）
@@ -398,7 +316,6 @@ Git 仓库用于保存代码、测试、配置模板、项目文档和品牌资�
 - [`SIMPLIFIED_VERIFICATION_POLICY.md`](SIMPLIFIED_VERIFICATION_POLICY.md)：高质量来源的简化审核规则
 - [`data/CANONICAL_QUESTION_BANK.md`](data/CANONICAL_QUESTION_BANK.md)：唯一主库约定
 - [`.agents/skills/math-error-notebook/SKILL.md`](.agents/skills/math-error-notebook/SKILL.md)：Skill 使用说明
-- [`skill-packages/math-error-notebook-harness/SKILL.md`](skill-packages/math-error-notebook-harness/SKILL.md)：Codex + Harness 省 Token 版说明
 
 ## 使用范围
 

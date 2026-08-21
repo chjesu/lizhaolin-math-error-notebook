@@ -113,7 +113,6 @@ flowchart LR
 | 优先级 | 入口 | 用途 | 是否可写主库 |
 |---|---|---|---|
 | 1 | `.agents/.../scripts/notebook.py` | 全部常规业务、导入、审核、推荐和学习状态 | 是，受校验约束 |
-| 2 | `skill-packages/math-error-notebook-harness/scripts/deepseek_worker.py` | 省 Token 安装包将文字判题、文本审核、推荐复核和标签建议下放给 DeepSeek，生成经本地门控的候选文件；启用该安装包即长期授权题目数据发送到 DeepSeek 官方端点，不逐批提示 | 否，始终报告 `database_modified=false`；发送前删除本地路径、密钥和机器信息，并写元数据审计 |
 | 2 | `.agents/.../scripts/practice_sheet.py` | 从已保存推荐生成 PDF 并打印 | 否，仅输出文件/打印 |
 | 3 | `scripts/extract_docx_omml.py` + `build_omml_exam_import.py` | DOCX/OMML 提取和未验证导入文件构建 | 否 |
 | 3 | `scripts/extract_pdf_text.py` | PDF 原文审核辅助 | 否 |
@@ -121,7 +120,7 @@ flowchart LR
 
 新智能体不得创建第二套数据库访问层、推荐器、PDF生成器或验证器。可复用功能应扩展权威入口，并补充 `tests/test_notebook.py`。
 
-Skill 分为两个二选一的安装包：`.agents/skills/math-error-notebook` 是纯 Codex 版，`skill-packages/math-error-notebook-harness` 是 Codex + Harness 省 Token 版。不得同时安装。共享文件由 `scripts/sync_skill_packages.py` 检查；核心能力只在纯 Codex 版维护后同步，Harness 版仅增加 DeepSeek 工作器、协议封装、固定依赖及版本说明。安装版按
+Skill 只有一个安装包：`.agents/skills/math-error-notebook`。Codex CLI 模型任务统一通过包内 `scripts/codex_task_router.py` 在 Luna、Terra 和 Sol 之间路由；安装版按
 `LIZHAOLIN_MATH_NOTEBOOK_ROOT`、当前目录向上的主库/项目标记、当前目录的顺序绑定项目；绑定后仍只使用该项目的 `data/math_notebook.db`，不会跨磁盘发现题库。
 
 ## 5. `notebook.py` 全部 CLI 功能
@@ -234,9 +233,7 @@ python -B .agents\skills\math-error-notebook\scripts\practice_sheet.py --exam-pa
 | `scripts/_test_extract.py` | 临时烟雾测试 | 预览 `docx_extractor.py` 前 5 题 | 不是生产入口 |
 | `scripts/extract_pdf_text.py` | 通用、只读 | 使用 pypdf 提取分页文本供源文件审核 | 文本型 PDF 使用；扫描 PDF 仍需图像/OCR复核 |
 | `scripts/audit_deepseek_db.py` | 历史取证、只读 | 比较候选库与唯一主库，输出插入/删除/字段差异及近似题 | 只生成报告，禁止据此自动合库 |
-| `scripts/codex_task_router.py` + `config/codex-model-routing.json` + `config/codex-schemas/` | Codex CLI 只读模型路由 | 按任务和显式风险在 Luna、Terra、Sol 之间选择；本地压缩输入，经 JSON Schema 输出，低置信度最多升级一次并记录无正文审计 | 不写数据库；判题、审核和推荐结果仍须经过 `grade-preview`、`prepare-review-batch`、`assign-recommendations` 等现有质量门；详见 `MODEL_ROUTING.md` |
-| `skill-packages/math-error-notebook-harness/scripts/deepseek_worker.py` + `safe_init.py` | 省 Token 版 DeepSeek Harness 工作器 | 支持 `grade/verify/recommend/tag` 四种文字任务；启用 Harness 版即长期授权题目数据发送到官方 `https://api.deepseek.com`，不逐批提示；发送前删除本地路径、密钥和机器信息，审计日志只保存任务、模型、题数、字符数和载荷哈希；含图、无学生步骤、遗漏、冲突及低置信度项升级给 Codex | 不写数据库；只运行 `grade-preview` 或 `prepare-review-batch` 等无写入质量门；正式提交仍经权威 `notebook.py`，API Key 只从环境变量读取 |
-| `scripts/sync_skill_packages.py` | 安装包一致性检查 | 检查两个安装包的共享文件逐字节一致；`--sync` 只把纯 Codex 版的共享文件复制到 Harness 版 | 不写数据库；不得把 Harness 专属文件同步回纯 Codex 版 |
+| `.agents/.../scripts/codex_task_router.py` + `assets/codex-model-routing.json` + `assets/codex-schemas/` | Codex CLI 只读模型路由 | 按任务和显式风险在 Luna、Terra、Sol 之间选择；本地压缩输入，经 JSON Schema 输出，低置信度最多升级一次并记录无正文审计 | 随唯一 Skill 安装；不写数据库；判题、审核和推荐结果仍须经过 `grade-preview`、`prepare-review-batch`、`assign-recommendations` 等现有质量门；详见 `MODEL_ROUTING.md` |
 | `scripts/audit_codex_rollout.py` | 历史取证、只读 | 将 Codex rollout JSONL 脱敏并生成可审核时间线 | 仅在有操作日志文件时使用 |
 | `scripts/build_db_correction_map.py` | 专项迁移、只读 | 将重新提取的来源题映射到题库内部 ID | 只产出 correction JSON，不直接改库 |
 | `scripts/apply_question_reviews.py` | 旧版批次验证器 | 逐条调用 `annotate --verify` 应用历史审核 manifest | 新审核改用 `audit-item` + `verify-item`；不得用于批量自动验证 |
@@ -329,17 +326,12 @@ math-error-notebook/
 │  ├─ SKILL.md                       智能体工作流
 │  ├─ agents/openai.yaml             Codex Skill 列表元数据
 │  ├─ scripts/notebook.py            唯一业务/数据库入口
+│  ├─ scripts/codex_task_router.py   Codex CLI Luna/Terra/Sol 路由入口
 │  ├─ scripts/math_notebook_project_paths.py  项目级/已安装 Skill 的根目录解析器
 │  ├─ scripts/practice_sheet.py      PDF与打印入口
 │  ├─ scripts/requirements-pdf.txt   安装版 PDF 固定依赖
 │  ├─ assets/                        JSON模板、代码表、种子题
 │  └─ references/                    按需读取的详细规范
-├─ skill-packages/math-error-notebook-harness/
-│  ├─ SKILL.md                       Codex + Harness 省 Token 版流程
-│  ├─ scripts/                       与纯 Codex 版共享核心脚本
-│  ├─ scripts/deepseek_worker.py     DeepSeek 四类文字任务候选工作器（不写库）
-│  ├─ scripts/safe_init.py           DeepSeek 协议安全封装
-│  └─ scripts/requirements-deepseek.txt  Harness 固定依赖
 ├─ data/
 │  ├─ math_notebook.db               唯一活动题库
 │  ├─ raw/                           原始结构化导入快照

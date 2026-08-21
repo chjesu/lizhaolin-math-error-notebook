@@ -8,7 +8,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = ROOT / "scripts" / "codex_task_router.py"
+MODULE_PATH = ROOT / ".agents" / "skills" / "math-error-notebook" / "scripts" / "codex_task_router.py"
 SPEC = importlib.util.spec_from_file_location("codex_task_router", MODULE_PATH)
 router = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
@@ -58,7 +58,7 @@ class CodexTaskRouterTests(unittest.TestCase):
 
     def test_all_output_schemas_are_valid_json_objects(self) -> None:
         for task in self.config["tasks"].values():
-            path = ROOT / task["schema"]
+            path = router.ROUTING_CONFIG.parent / task["schema"]
             schema = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(schema["type"], "object")
             self.assertFalse(schema["additionalProperties"])
@@ -94,6 +94,12 @@ class CodexTaskRouterTests(unittest.TestCase):
                 "grade-text",
                 {"verdict": "wrong", "error_analysis": None},
             )
+
+    def test_installed_skill_contains_router_and_schemas(self) -> None:
+        skill = ROOT / ".agents" / "skills" / "math-error-notebook"
+        self.assertTrue((skill / "scripts" / "codex_task_router.py").is_file())
+        self.assertTrue((skill / "assets" / "codex-model-routing.json").is_file())
+        self.assertTrue((skill / "assets" / "codex-schemas" / "grade-result.schema.json").is_file())
 
 
 if __name__ == "__main__":

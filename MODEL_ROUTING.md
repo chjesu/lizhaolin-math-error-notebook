@@ -19,7 +19,7 @@
 ## 安装 CLI profiles
 
 ```powershell
-python -X utf8 -B scripts\codex_task_router.py install-profiles --json
+python -X utf8 -B <skill-dir>\scripts\codex_task_router.py install-profiles --json
 ```
 
 该命令创建：
@@ -33,10 +33,10 @@ python -X utf8 -B scripts\codex_task_router.py install-profiles --json
 ## 查看路线
 
 ```powershell
-python -X utf8 -B scripts\codex_task_router.py route `
+python -X utf8 -B <skill-dir>\scripts\codex_task_router.py route `
   --task verify-simplified --json
 
-python -X utf8 -B scripts\codex_task_router.py route `
+python -X utf8 -B <skill-dir>\scripts\codex_task_router.py route `
   --task grade-photo --has-image --risk ambiguous_visual --json
 ```
 
@@ -51,7 +51,7 @@ python -X utf8 -B scripts\codex_task_router.py route `
 简化验证：
 
 ```powershell
-python -X utf8 -B scripts\codex_task_router.py run `
+python -X utf8 -B <skill-dir>\scripts\codex_task_router.py run `
   --task verify-simplified `
   --input data\audits\<批次>\manifest.json `
   --out data\audits\<批次>\codex-decisions.json `
@@ -69,7 +69,7 @@ python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py `
 照片判题必须先运行 `photo-preflight`，然后把每个 `preview_path` 分别作为 `--image`：
 
 ```powershell
-python -X utf8 -B scripts\codex_task_router.py run `
+python -X utf8 -B <skill-dir>\scripts\codex_task_router.py run `
   --task grade-photo `
   --input data\grade-inputs\evidence.json `
   --image data\grade-inputs\preview-1.jpg `
@@ -95,9 +95,9 @@ python -X utf8 -B scripts\codex_task_router.py run `
 
 ## 配置与测试
 
-- 路由配置：`config/codex-model-routing.json`
-- 输出 Schema：`config/codex-schemas/`
-- 路由器：`scripts/codex_task_router.py`
+- 路由配置：`<skill-dir>/assets/codex-model-routing.json`
+- 输出 Schema：`<skill-dir>/assets/codex-schemas/`
+- 路由器：`<skill-dir>/scripts/codex_task_router.py`
 - 回归测试：`tests/test_codex_task_router.py`
 
 ```powershell

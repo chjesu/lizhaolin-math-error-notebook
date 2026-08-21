@@ -22,16 +22,20 @@ import uuid
 from typing import Any
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ROUTING_CONFIG = PROJECT_ROOT / "config" / "codex-model-routing.json"
-NOTEBOOK = (
-    PROJECT_ROOT
-    / ".agents"
-    / "skills"
-    / "math-error-notebook"
-    / "scripts"
-    / "notebook.py"
-)
+SCRIPT_DIR = Path(__file__).resolve().parent
+INSTALLED_SKILL_DIR = SCRIPT_DIR.parent if (SCRIPT_DIR.parent / "SKILL.md").is_file() else None
+if INSTALLED_SKILL_DIR:
+    SKILL_DIR = INSTALLED_SKILL_DIR
+    sys.path.insert(0, str(SCRIPT_DIR))
+    from math_notebook_project_paths import resolve_project_root
+
+    PROJECT_ROOT = resolve_project_root(SKILL_DIR)
+    ROUTING_CONFIG = SKILL_DIR / "assets" / "codex-model-routing.json"
+else:
+    PROJECT_ROOT = SCRIPT_DIR.parent
+    SKILL_DIR = PROJECT_ROOT / ".agents" / "skills" / "math-error-notebook"
+    ROUTING_CONFIG = PROJECT_ROOT / "config" / "codex-model-routing.json"
+NOTEBOOK = SKILL_DIR / "scripts" / "notebook.py"
 
 
 class RoutingBlocked(RuntimeError):
@@ -100,7 +104,7 @@ def select_route(
         if profile_key == base_profile
         else None
     ) or profile["reasoning_effort"]
-    schema_path = (PROJECT_ROOT / str(task_config["schema"])).resolve()
+    schema_path = (ROUTING_CONFIG.parent / str(task_config["schema"])).resolve()
     if not schema_path.is_file():
         raise ValueError(f"missing output schema: {schema_path}")
     return {
@@ -220,14 +224,7 @@ def local_catalogs() -> dict[str, Any]:
         raise RuntimeError("cannot load notebook catalogs")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    knowledge_path = (
-        PROJECT_ROOT
-        / ".agents"
-        / "skills"
-        / "math-error-notebook"
-        / "assets"
-        / "knowledge-points.json"
-    )
+    knowledge_path = SKILL_DIR / "assets" / "knowledge-points.json"
     knowledge = json.loads(knowledge_path.read_text(encoding="utf-8-sig"))
     if not isinstance(knowledge, list):
         raise ValueError("knowledge-points.json must contain an array")

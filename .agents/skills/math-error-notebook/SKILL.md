@@ -12,7 +12,6 @@ description: Manage a Chinese high-school math error notebook with Codex and one
 - Start routine work with one compact, read-only call: `scripts/notebook.py agent-context --task grade|recommend|verify|import|review|pdf|maintenance --json`. Use `doctor --json` for environment health and `handoff --json` for a compact transfer snapshot.
 - Use image input directly for photos; never claim to switch models/providers. The default preflight only controls image size locally, and the current remote vision-capable model must inspect every returned preview.
 - Text-only models, including DeepSeek sessions without image input, must hand photo grading to a vision-capable model; they must not infer unseen handwriting from filenames or OCR remnants.
-- Only explicit `photo-preflight --preflight-mode ocr` calls share the machine-wide OCR execution lock. Concurrent OCR diagnostics queue through the authoritative entry point; the default remote-preview route loads no OCR model and takes no OCR lock.
 - Run deterministic work through `scripts/notebook.py`. Its project installation binds to the sole bank `data/math_notebook.db`; never discover, merge, copy over, or select another same-named DB.
 - For bounded Codex CLI model tasks, use `scripts/codex_task_router.py`: Luna handles high-throughput tagging, recommendation review, and simplified verification; Terra handles routine grading and tutoring; Sol handles full derivation, repair, generation, and adjudication. The router runs read-only, validates JSON Schema output, and never writes the database.
 - Install the three CLI profiles once with `scripts/codex_task_router.py install-profiles --json`. Use `route --task <task> --json` to inspect a decision and `run --task <task> --input <json> --out <json> --json` to execute it. Risk flags may promote work, and low-confidence output escalates at most once.
@@ -54,47 +53,15 @@ operation.
 python -B <skill-dir>\scripts\notebook.py photo-preflight <image...> --json
 ```
 
-The default is `--preflight-mode remote --task grade`. It does not import or
-start RapidOCR, PaddleOCR, or local Qwen, and it does not acquire the shared OCR
-lock. `review_route=remote_model_visual_review` means the preview must be viewed,
+The command does not run OCR or a local visual model. `review_route=remote_model_visual_review` means the preview must be viewed,
 not merely read as a path. Use the compact result directly; routine grading must
 not read the full packet. When a printed question ID is visible, load only
 `question <id> --compact --json`; request the full item only if its solution is
 genuinely needed.
 
-The slower legacy OCR route is diagnostic-only:
-
-```powershell
-python -X utf8 -B <skill-dir>\scripts\notebook.py photo-preflight <image...> --preflight-mode ocr --formula-ocr off --vision-mode off --json
-```
-
-Use `--formula-ocr paddle` or `--vision-mode required` only with
-`--preflight-mode ocr` and only when explicitly diagnosing those local services.
-OCR/formula output remains untrusted and never replaces visual inspection.
-
-When explicitly diagnosing a local visual model, it may act only as a
-**transcription layer**. Get the fixed, versioned prompt contract
-from the authoritative CLI, give that prompt plus one preview/crop and its
-`source_sha256` to the local model, then validate the JSON before the grading
-model reads it:
-
-```powershell
-python -X utf8 -B <skill-dir>\scripts\notebook.py photo-vlm-contract --json
-python -X utf8 -B <skill-dir>\scripts\notebook.py photo-vlm-validate <response.json> --packet <ocr-packet.json> --page 1 --json
-```
-
-The local model is forbidden to solve, grade, supply a standard answer, diagnose
-an error, or emit chain-of-thought. The validator rejects grading fields, wrong
-prompt/schema versions, non-JSON wrappers, and source-hash mismatches. It also
-compares printed transcription with RapidOCR and returns either `quality_gate=pass`
-or `visual_review_required`. Only the validated compact JSON may enter the
-DeepSeek/Codex grading context; it does not relax visual review for ambiguous
-formulae, handwriting, or diagrams.
-
 For image-backed bank audits, `prepare-audit-batch --visual-evidence auto`
 creates the same size-controlled previews and routes them to the remote visual
-reviewer without OCR. `off` skips the evidence packet. `required` is reserved for
-an explicit legacy OCR/local-Qwen diagnostic.
+reviewer. `off` skips preview creation.
 
 2. Separate printed content from handwriting; reconstruct steps and identify the first substantive error.
 3. If a key symbol, condition, diagram, or step is unreadable, state it and request a clearer crop. Never fabricate. Use `unclear` for insufficient evidence; use `careless` only with direct evidence.

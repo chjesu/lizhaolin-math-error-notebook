@@ -57,7 +57,7 @@ python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py agent-c
 
 ## 5. DeepSeek 无视觉能力时的照片判题流程
 
-默认 `photo-preflight` 只在本地完成 EXIF 方向、透明底白底化和尺寸压缩，不运行 RapidOCR、PaddleOCR 或本地 Qwen，也不占用 OCR 锁：
+`photo-preflight` 只在本地完成 EXIF 方向、透明底白底化、尺寸压缩和内容哈希缓存：
 
 ```powershell
 python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-preflight <图片路径> --task grade --json
@@ -65,24 +65,7 @@ python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-p
 
 返回 `review_route=remote_model_visual_review` 时，必须把全部 `preview_paths` 交给具备图片能力的 Codex/Kimi 等远端模型直接查看。DeepSeek 本身没有视觉能力时不得继续判图、不得依据历史 OCR 或文件名猜测，也不得执行 `grade-commit`；应把任务和预览路径交接给视觉模型。视觉模型完成判题后，DeepSeek 可以继续处理结构化保存、推荐和 PDF 等纯文本步骤。
 
-只有明确诊断 OCR 或本地服务时才使用：
-
-```powershell
-python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-preflight <图片路径> --preflight-mode ocr --formula-ocr off --vision-mode off --json
-```
-
-显式 OCR 模式仍经过三科共享执行锁；不得另起脚本绕过。`--formula-ocr paddle` 与 `--vision-mode required` 也必须同时指定 `--preflight-mode ocr`。
-
-以下命令仅用于诊断合同或单独校验历史响应，日常流程无需人工拼接：
-
-```powershell
-python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-vlm-contract --json
-python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-vlm-validate <本地模型响应.json> --packet <ocr-packet.json> --page 1 --json
-```
-
-历史本地模型响应只有通过 `photo-vlm-validate` 后才能作为辅助转录。本地模型不得返回对错、标准答案、解题过程、错误原因或思维链；它不再属于日常判题链路。
-
-日常判题由远端视觉模型直接读取命令返回的预览路径，不要再次读取完整 `ocr-packet.json`。如果视觉模型看见题库编号，可优先读取主库中的标准原题：
+项目不提供本地 OCR 或本地视觉模型入口。判题由远端视觉模型直接读取命令返回的全部预览路径，不要再次读取完整 `photo-preflight.json`。如果视觉模型看见题库编号，可优先读取主库中的标准原题：
 
 ```powershell
 python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py question <题库编号> --compact --json
@@ -101,7 +84,7 @@ python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py questio
   → 看不清：停止保存并请求清晰局部图
 ```
 
-这套流程用较小且清晰的标准化图片控制输入成本，同时避免本地视觉/OCR的等待时间，不降低判题证据标准。
+这套流程用较小且清晰的标准化图片控制输入成本，同时避免本地模型的安装、显存占用和等待时间，不降低判题证据标准。
 
 ## 6. 不变量
 

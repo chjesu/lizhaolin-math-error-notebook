@@ -11,7 +11,7 @@
 - 错题记录：`25`；到期复习阶段：`110`
 - 主执行器：`.agents/skills/math-error-notebook/scripts/notebook.py`
 - 组卷与打印：`.agents/skills/math-error-notebook/scripts/practice_sheet.py`
-- 照片视觉预检：`notebook.py photo-preflight`（默认只做 EXIF 方向、透明底白底化与尺寸压缩，远端视觉模型直接看全部预览；RapidOCR、PaddleGPU 与本地 Qwen 仅保留为显式诊断链路）
+- 照片视觉预检：`notebook.py photo-preflight`（只做 EXIF 方向、透明底白底化、尺寸压缩与缓存，远端视觉模型直接看全部预览）
 - 默认打印机：`EPSON72097C (L3250 Series)`
 
 数量是 2026-08-08 的实施前快照；实际状态以 `bank-info --json` 为准。
@@ -134,9 +134,7 @@ Skill 只有一个安装包：`.agents/skills/math-error-notebook`。Codex CLI �
 | 智能体交接 | `handoff` | 精简输出主库哈希、验证数量、主要问题、复习任务和 Git 状态 |
 | 行为标准 | `behavior-cases` | 按任务列出跨模型标准案例；只在需要时加载单个完整案例 |
 | 可恢复流程 | `workflow-start` / `workflow-update` / `workflow-status` | 在 `data/workflows/` 保存步骤、产物和断点，不重复已完成阶段 |
-| 照片预检 | `photo-preflight` | 默认 `--preflight-mode remote`：仅 EXIF 方向、透明底白底化、JPEG 编码与尺寸控制，不加载 OCR/VLM、不占共享锁；精简返回全部 `preview_paths` 与 `review_route=remote_model_visual_review`，由远端视觉模型逐页查看。`--preflight-mode ocr` 才启用旧 RapidOCR/裁剪链路，`--formula-ocr paddle` 与 `--vision-mode required` 仅用于显式诊断 |
-| 本地视觉转录契约 | `photo-vlm-contract` | 返回固定提示词的位置、版本、必填字段和禁止字段；本地模型只转录可见证据，不得判题或给答案 |
-| 本地视觉转录质量门 | `photo-vlm-validate` | 将本地模型 JSON 与 `ocr-packet.json` 页面的图片哈希及 RapidOCR 文本绑定；拒绝越权字段、错误版本、非 JSON 包装和图片错配，输出精简证据或升级视觉复核 |
+| 照片预检 | `photo-preflight` | 仅做 EXIF 方向、透明底白底化、JPEG 编码、尺寸控制和内容哈希缓存；精简返回全部 `preview_paths` 与 `review_route=remote_model_visual_review`，由远端视觉模型逐页查看 |
 | 初始化 | `init` | 创建 schema、装载知识点；主库存在时不得用来重建数据 |
 | 初始化 | `seed` | 幂等导入项目原创种子题，仅用于首次建库 |
 | 题库身份 | `bank-info` | 主库绝对路径、SHA256、schema、完整性、外键和数量 |
@@ -171,7 +169,7 @@ Skill 只有一个安装包：`.agents/skills/math-error-notebook`。Codex CLI �
 | 单题标注 | `annotate` | 修正题干/答案/解析/标签/难度/题型；内部验证质量门 |
 | 审核队列 | `audit-queue` | 精简列出未验证题，可按来源过滤；`--simplified-only` 只列自 2026-07-20 起入库的简化验证题 |
 | 审核包 | `audit-item` | 汇总一题的内容、来源、问题、近重复项、审核要求和 `verification_mode` |
-| 审核脚手架 | `prepare-audit-batch` | 生成逐题审核包和 verdict=pending 的审核 JSON，不修改数据库；支持 `--simplified-only`；`--visual-evidence auto` 只对含图题生成远端视觉用标准预览，文本题零视觉开销；透明 PNG 仅在审核工作目录生成白底预览。`off` 禁用视觉证据，`required` 仅用于显式旧 OCR/本地 Qwen 诊断 |
+| 审核脚手架 | `prepare-audit-batch` | 生成逐题审核包和 verdict=pending 的审核 JSON，不修改数据库；支持 `--simplified-only`；`--visual-evidence auto` 只对含图题生成远端视觉用标准预览，文本题零视觉开销；透明 PNG 仅在审核工作目录生成白底预览，`off` 禁用视觉证据 |
 | 精简审核扩展 | `prepare-review-batch` | 将模型逐题给出的精简决策扩展为完整审核 JSON，不替代数学判断、不写库 |
 | 结构化验证 | `verify-item` | 接受独立审核 JSON；逐题记录并在通过时提升状态 |
 | 批量提交审核 | `verify-review-batch` | 逐项复用 `verify-item` 质量门提交审核文件，只压缩命令输出，不批量放宽验证 |
@@ -193,18 +191,13 @@ Skill 只有一个安装包：`.agents/skills/math-error-notebook`。Codex CLI �
 - 检索与统计：`stats`、`coverage`、`list_knowledge_points`、`list_cause_codes`、`list_feature_codes`、`question_detail`、`search_questions`、`search_index_status`、`rebuild_search_index`
 - 审核与修复：`annotate_question`、`question_issue_codes`、`near_duplicate_candidates`、`audit_item`、`prepare_audit_batch`、`prepare_verification_reviews`、`apply_verification_review`、`apply_verification_review_batch`、`repair_embedded_options`、`audit_queue`、`audit_summary`
 - 启动与交接：`doctor`、`agent_context`、`handoff_snapshot`、`behavior_cases`、`workflow_start/update/status`、`_git_summary`
-- 照片视觉输入：`photo_ocr.py` 中的 `process_photos` 默认调用 `prepare_remote_preview`，只生成尺寸受控的远端视觉输入；显式 OCR 诊断才使用 `choose_orientation`、`save_detail_crops`、`run_paddle_formula_ocr`。`paddle_formula_worker.py` 在独立进程中加载 GPU 模型
+- 照片视觉输入：`photo_preflight.py` 中的 `prepare_photo_previews` 只生成方向正确、白底、尺寸受控且可缓存的远端视觉输入，不识别、不解题、不判题
 
-### OCR 运行时
+### 照片预处理
 
-- 日常判题不使用 OCR 运行时：默认 `remote` 模式只依赖 Pillow，直接把标准化预览交给远端视觉模型。
-- 轻量主流程固定在忽略版本控制的 `.runtime/ocr`，依赖由 `requirements-ocr.txt` 锁定。
-- 公式增强固定在 `.runtime/paddleocr`，模型与缓存固定在 `.runtime/paddle-home`，依赖由 `requirements-paddleocr.txt` 锁定；不得安装到系统 Python 或新建另一套照片入口。
-- `auto` 模式在 Paddle 不可用或运行失败时保留 RapidOCR 结果并写入警告；`paddle` 模式用于诊断，公式阶段失败即报错。
-- `ocr-packet.json` 缓存记录 OCR profile；运行时能力变化会自动重建旧缓存。缓存公式必须保留裁剪路径、坐标及 `requires_visual_confirmation=true`。
-- 固定视觉转录提示词位于 `.agents/skills/math-error-notebook/assets/local-vlm-transcription-prompt.txt`。项目只连接用户已启动的本地 Qwen 服务，不在业务命令中自动启停或并行加载模型。Qwen 只转录可见证据并返回 `math-photo-evidence-v1` JSON；代码围栏、坏 JSON、越权字段、来源 SHA256 错配或识别冲突一律拒绝并回退到 RapidOCR + 模型视觉复核。`doctor.local_visual_model` 报告服务状态。
-- `doctor --json` 同时报告 `ocr_runtime` 与 `formula_ocr_runtime`，含模型是否已缓存。
-- 三科错题本在显式 `--preflight-mode ocr` 时共用一个整机级跨进程 OCR 执行锁，默认位于 `%TEMP%/LiZhaolinErrorNotebooks/locks/photo-ocr.lock`；默认远端预览模式不取得此锁。锁覆盖 RapidOCR、裁剪生成和 Paddle 公式识别，避免不同项目或不同会话同时加载模型。
+- 预处理只依赖 Pillow，不需要独立模型运行时、共享锁或 GPU。
+- `photo-preflight.json` 记录输入哈希、预览路径与尺寸；相同输入和参数直接命中缓存。
+- 标准化预览必须由具备视觉能力的远端模型逐页查看；文本模型必须交接，不得依据路径或历史文本猜测。
 - CLI：`print_output`、`build_parser`、`main`
 
 ## 6. `practice_sheet.py` 完整职责
@@ -227,14 +220,14 @@ python -B .agents\skills\math-error-notebook\scripts\practice_sheet.py --exam-pa
 
 | 脚本 | 类型 | 作用 | 新任务使用规则 |
 |---|---|---|---|
-| `scripts/extract_docx_omml.py` | 通用、只读提取 | 直接读取 OOXML，将微软 OMML 公式转为 LaTeX；保留旧式 MathType/OLE 的 VML 预览图；导出段落 JSON/Markdown/媒体 | DOCX 精确公式提取首选；OLE 预览仍须视觉/公式 OCR 复核 |
+| `scripts/extract_docx_omml.py` | 通用、只读提取 | 直接读取 OOXML，将微软 OMML 公式转为 LaTeX；保留旧式 MathType/OLE 的 VML 预览图；导出段落 JSON/Markdown/媒体 | DOCX 精确公式提取首选；OLE 预览仍须远端视觉复核 |
 | `scripts/docx_parsing.py` | 通用解析库 | 清理 OMML 转换后的 LaTeX，并拆分混合格式选项且保留同行题干 | 由通用构建器和历史专项脚本共同复用，禁止再从专项脚本导入通用能力 |
 | `scripts/build_omml_exam_import.py` | 通用批次转换 | 兼容常见题号/选项标记，分题并保留原段落范围，配对答案/真实解析，输出未验证 JSONL 与缺题、重号、解析失败等质量报告 | 与上一脚本配套；质量门通过后才可导入，导入后仍逐题验证 |
 | `scripts/import_recent_docx_batch.py` | 日期批次编排 | 去重后调用 OMML 提取与构建，并在 `import-file` 前检查题号连续性、解析失败、字段完整性和选项结构 | 任一异常标记 `blocked_quality_gate` 并停止该卷入库；不得绕过 |
 | `scripts/audit_recent_docx_batch.py` | 入库后结构审核 | 构建逐题审核包，检查字段、标签、来源和题干/答案/解析/选项中的全部图片引用 | 图形依赖题必须转视觉复核，不得直接走纯文本简化通过 |
 | `scripts/docx_extractor.py` | 实验性一体提取 | 基于 python-docx/lxml 解析 OMML、题目、答案和解析，支持预览/JSONL | 与前两者能力重叠；未完成统一代码映射，未经回归测试不要作为主流程 |
 | `scripts/_test_extract.py` | 临时烟雾测试 | 预览 `docx_extractor.py` 前 5 题 | 不是生产入口 |
-| `scripts/extract_pdf_text.py` | 通用、只读 | 使用 pypdf 提取分页文本供源文件审核 | 文本型 PDF 使用；扫描 PDF 仍需图像/OCR复核 |
+| `scripts/extract_pdf_text.py` | 通用、只读 | 使用 pypdf 提取分页文本供源文件审核 | 文本型 PDF 使用；扫描 PDF 仍需远端视觉复核 |
 | `scripts/audit_deepseek_db.py` | 历史取证、只读 | 比较候选库与唯一主库，输出插入/删除/字段差异及近似题 | 只生成报告，禁止据此自动合库 |
 | `.agents/.../scripts/codex_task_router.py` + `assets/codex-model-routing.json` + `assets/codex-schemas/` | Codex CLI 只读模型路由 | 按任务和显式风险在 Luna、Terra、Sol 之间选择；本地压缩输入，经 JSON Schema 输出，低置信度最多升级一次并记录无正文审计 | 随唯一 Skill 安装；不写数据库；判题、审核和推荐结果仍须经过 `grade-preview`、`prepare-review-batch`、`assign-recommendations` 等现有质量门；详见 `MODEL_ROUTING.md` |
 | `scripts/audit_codex_rollout.py` | 历史取证、只读 | 将 Codex rollout JSONL 脱敏并生成可审核时间线 | 仅在有操作日志文件时使用 |
@@ -383,7 +376,7 @@ PowerShell 读取项目文本必须显式使用 `Get-Content -Encoding UTF8`，P
 
 固定流程：
 
-- 判题：`photo-preflight --task grade（本地仅尺寸控制） → 远端视觉模型打开全部 preview_paths → question --compact（题号可见时） → grade-preview → grade-commit`；不得在常规流程中启动 OCR/本地 Qwen，也不得整包读取 `ocr-packet.json`
+- 判题：`photo-preflight --task grade（本地仅规范化与缓存） → 远端视觉模型打开全部 preview_paths → question --compact（题号可见时） → grade-preview → grade-commit`；项目不启动本地识别模型，也不得整包读取 `photo-preflight.json`
 - 推荐：`recommend-packet --limit 3 → 模型只复核精简题干 → assign-recommendations <同一packet>`；仅对个别疑难候选调用 `question <id>`，不再默认加载全部答案与长解析
 - 每日复习：`daily-review-packet → 补齐缺少的已复核推荐 → practice_sheet.py --daily-packet`；每题只暴露一个当前阶段，积压只增加 `overdue_days`，完成后按实际完成日顺延后续阶段
 - 批量 DOCX：`import_recent_docx_batch.py → audit_recent_docx_batch.py`

@@ -42,12 +42,12 @@ flowchart LR
     I --> G
 ```
 
-1. **以学生作答为证据**：照片 OCR 只负责减少录入成本，数学公式、图形和手写步骤仍需视觉复核；看不清的内容不会被静默补造。
+1. **以学生作答为证据**：照片先规范化，再由远端视觉模型直接复核数学公式、图形和手写步骤；看不清的内容不会被静默补造。
 2. **先找第一处实质错误**：不只比较最终答案，而是还原学生的解题路径，找到最早改变结论的错误步骤。
 3. **把错因结构化**：将知识点、题型结构、难度、错误原因和防错提示保存下来，使后续推荐和统计有可靠依据。
 4. **只从已验证题库推荐**：推荐题必须经过来源、题干、答案、解析、标签和重复项审核，避免用未经核验的生成题冒充可靠练习。
 5. **训练强度随表现变化**：从同难度巩固逐步过渡到变式和略高难度迁移；答错或部分正确时重新进入针对性循环。
-6. **程序与大模型分工**：程序负责 OCR、缓存、去重、检索、事务、组卷和计划；大模型负责理解作答、数学推理和相关性判断。两者互相约束，而不是让模型直接修改题库。
+6. **程序与大模型分工**：程序负责图片规范化、缓存、去重、检索、事务、组卷和计划；大模型负责视觉理解、数学推理和相关性判断。两者互相约束，而不是让模型直接修改题库。
 
 ## 项目价值
 
@@ -82,13 +82,13 @@ flowchart LR
 - 不是只看最终答案、自动贴上“粗心”标签的判题器；
 - 不是未经验证便批量生成推荐题的题海工具；
 - 不是绕过版权、登录、付费墙或访问限制的试题抓取器；
-- 不是让 OCR 或大模型直接决定题库真实性的黑箱系统。
+- 不是让单次模型输出直接决定题库真实性的黑箱系统。
 
 项目只提供一个 `math-error-notebook` Skill 安装包，由 Codex CLI 按任务在 Luna、Terra 和 Sol 之间自动路由；所有模型共用同一套数据规范、验证门槛和命令行入口。
 
 ## 核心能力
 
-- **照片批改**：本地只做 EXIF 方向、透明底白底化与尺寸压缩，远端视觉模型直接查看标准化预览并判题；RapidOCR、PaddleOCR 和本地 Qwen 仅保留为显式诊断工具。
+- **照片批改**：本地只做 EXIF 方向、透明底白底化、尺寸压缩与缓存，远端视觉模型直接查看标准化预览并判题。
 - **步骤级诊断**：定位第一处实质错误，区分知识点未掌握、方法选择错误、计算错误等原因。
 - **可信题库**：记录年级、难度、知识点、来源、许可、结构特征、去重指纹和验证状态。
 - **针对性推荐**：只从已验证题中按知识点、错因、难度和历史表现推荐同类型练习。
@@ -120,7 +120,7 @@ flowchart LR
 
 1. 唯一主库固定为 `data/math_notebook.db`，不得搜索、合并或改用其他同名数据库。
 2. 推荐题必须已经验证，并显示来源和推荐理由。
-3. 默认判题不运行 OCR；数学公式、图形和手写步骤由远端视觉模型直接复核。显式诊断所得 OCR 也只能作辅助。
+3. 项目不运行本地 OCR 或本地视觉模型；数学公式、图形和手写步骤由远端视觉模型直接复核。
 4. 透明 PNG 只在审核看图阶段生成白底预览，原始入库图片保持不变。
 5. 未验证题不得作为推荐题；来源信誉不能替代逐题审核。
 6. 只导入开放授权、官方公开或用户确认有权使用的材料。
@@ -139,13 +139,6 @@ flowchart LR
 ```powershell
 python -X utf8 -B -m pip install -r requirements-math.txt
 python -X utf8 -B -m pip install -r requirements-pdf.txt
-python -X utf8 -B -m pip install -r requirements-ocr.txt
-```
-
-PaddleOCR 公式识别为可选能力：
-
-```powershell
-python -X utf8 -B -m pip install -r requirements-paddleocr.txt
 ```
 
 ### Codex CLI 自动模型路由
@@ -221,9 +214,6 @@ python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py seed
 # 本地仅控制尺寸；随后由当前远端视觉模型打开全部 preview_paths
 python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-preflight <照片路径> --task grade --json
 
-# 仅在明确诊断 OCR 时使用较慢的旧链路
-python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py photo-preflight <照片路径> --preflight-mode ocr --formula-ocr off --vision-mode off --json
-
 # 生成判题预览；确认后再提交正式记录
 python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py grade-preview <判题输入JSON> --json
 python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py grade-commit <预览JSON> --json
@@ -291,7 +281,7 @@ python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py verify-
 python -X utf8 -B -m unittest discover -s tests -p "test_*.py"
 ```
 
-修改代码后至少运行与改动相关的测试；涉及权威 CLI、导入、PDF 或 OCR 时，应运行完整测试并执行：
+修改代码后至少运行与改动相关的测试；涉及权威 CLI、导入、PDF 或照片预处理时，应运行完整测试并执行：
 
 ```powershell
 python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py doctor --json

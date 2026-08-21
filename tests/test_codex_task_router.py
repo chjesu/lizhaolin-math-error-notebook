@@ -64,7 +64,7 @@ class CodexTaskRouterTests(unittest.TestCase):
             self.assertFalse(schema["additionalProperties"])
 
     def test_prompt_embeds_compact_input_without_requiring_shell_read(self) -> None:
-        with tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "packet.json"
             path.write_text('{"question":{"stem":"x^2"}}', encoding="utf-8")
             compact = router.compact_input(path)

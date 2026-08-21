@@ -234,6 +234,7 @@ python -B .agents\skills\math-error-notebook\scripts\practice_sheet.py --exam-pa
 | `scripts/_test_extract.py` | 临时烟雾测试 | 预览 `docx_extractor.py` 前 5 题 | 不是生产入口 |
 | `scripts/extract_pdf_text.py` | 通用、只读 | 使用 pypdf 提取分页文本供源文件审核 | 文本型 PDF 使用；扫描 PDF 仍需图像/OCR复核 |
 | `scripts/audit_deepseek_db.py` | 历史取证、只读 | 比较候选库与唯一主库，输出插入/删除/字段差异及近似题 | 只生成报告，禁止据此自动合库 |
+| `scripts/codex_task_router.py` + `config/codex-model-routing.json` + `config/codex-schemas/` | Codex CLI 只读模型路由 | 按任务和显式风险在 Luna、Terra、Sol 之间选择；本地压缩输入，经 JSON Schema 输出，低置信度最多升级一次并记录无正文审计 | 不写数据库；判题、审核和推荐结果仍须经过 `grade-preview`、`prepare-review-batch`、`assign-recommendations` 等现有质量门；详见 `MODEL_ROUTING.md` |
 | `skill-packages/math-error-notebook-harness/scripts/deepseek_worker.py` + `safe_init.py` | 省 Token 版 DeepSeek Harness 工作器 | 支持 `grade/verify/recommend/tag` 四种文字任务；启用 Harness 版即长期授权题目数据发送到官方 `https://api.deepseek.com`，不逐批提示；发送前删除本地路径、密钥和机器信息，审计日志只保存任务、模型、题数、字符数和载荷哈希；含图、无学生步骤、遗漏、冲突及低置信度项升级给 Codex | 不写数据库；只运行 `grade-preview` 或 `prepare-review-batch` 等无写入质量门；正式提交仍经权威 `notebook.py`，API Key 只从环境变量读取 |
 | `scripts/sync_skill_packages.py` | 安装包一致性检查 | 检查两个安装包的共享文件逐字节一致；`--sync` 只把纯 Codex 版的共享文件复制到 Harness 版 | 不写数据库；不得把 Harness 专属文件同步回纯 Codex 版 |
 | `scripts/audit_codex_rollout.py` | 历史取证、只读 | 将 Codex rollout JSONL 脱敏并生成可审核时间线 | 仅在有操作日志文件时使用 |

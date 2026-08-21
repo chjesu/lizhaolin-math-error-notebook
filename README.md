@@ -132,6 +132,7 @@ flowchart LR
 - Python 3.11 或更高版本
 - LibreOffice（DOCX/PDF 转换与版面检查，可选但推荐）
 - 默认打印机（仅在需要直接打印时使用）
+- Codex CLI 0.147.0 或更高版本（自动模型路由可选）
 
 安装基础依赖：
 
@@ -155,6 +156,19 @@ python -X utf8 -B -m pip install --target .runtime\deepseek `
 ```
 
 API Key 仅通过 `DEEPSEEK_API_KEY` 环境变量读取，不写入仓库或候选文件。
+
+### Codex CLI 自动模型路由
+
+纯 Codex 版可按任务自动选择模型：Luna 处理高吞吐标签、推荐和简化审核，Terra
+处理日常判题与教学引导，Sol 处理完整推导、题目修复和争议裁决。模型始终运行在
+只读沙箱，输出受 JSON Schema 约束，正式写库仍经过原有质量门。
+
+```powershell
+python -X utf8 -B scripts\codex_task_router.py install-profiles --json
+python -X utf8 -B scripts\codex_task_router.py route --task grade-photo --has-image --json
+```
+
+完整任务表、风险升级规则和运行示例见 [`MODEL_ROUTING.md`](MODEL_ROUTING.md)。
 
 ## 快速开始
 
@@ -379,6 +393,7 @@ Git 仓库用于保存代码、测试、配置模板、项目文档和品牌资�
 ## 文档入口
 
 - [`PROJECT_ARCHITECTURE.md`](PROJECT_ARCHITECTURE.md)：完整架构、脚本职责和防重复开发索引
+- [`MODEL_ROUTING.md`](MODEL_ROUTING.md)：Codex CLI 的 Luna、Terra、Sol 任务路由与使用方法
 - [`AGENTS.md`](AGENTS.md)：智能体工作规则与质量门
 - [`SIMPLIFIED_VERIFICATION_POLICY.md`](SIMPLIFIED_VERIFICATION_POLICY.md)：高质量来源的简化审核规则
 - [`data/CANONICAL_QUESTION_BANK.md`](data/CANONICAL_QUESTION_BANK.md)：唯一主库约定

@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "enum": ["complete", "needs_escalation", "unclear"]},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "escalation_reasons": {"type": "array", "items": {"type": "string"}},
+    "payload": {
+      "type": "object",
+      "properties": {
+        "reviewer": {"type": "string"},
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "question_id": {"type": "string"},
+              "verdict": {"type": "string", "enum": ["pass", "corrected", "needs_revision", "reject"]},
+              "packet_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "checks_confirmed": {"type": "boolean"},
+              "independent_answer": {"type": "string"},
+              "independent_solution": {"type": "string"},
+              "answer_check": {"type": "string", "enum": ["match", "corrected", "unresolved"]},
+              "solution_check": {"type": "string", "enum": ["match", "corrected", "completed", "unresolved"]},
+              "knowledge_codes": {"type": "array", "items": {"type": "string"}},
+              "target_causes": {"type": "array", "items": {"type": "string"}},
+              "feature_codes": {"type": "array", "items": {"type": "string"}},
+              "grade": {"type": "integer", "enum": [10, 11, 12]},
+              "difficulty": {"type": "number", "minimum": 1, "maximum": 5},
+              "question_type": {"type": "string"},
+              "correction": {
+                "type": "object",
+                "properties": {
+                  "stem": {"type": "string"},
+                  "options": {"type": "array", "items": {"type": "string"}},
+                  "answer": {"type": "string"},
+                  "solution": {"type": "string"}
+                },
+                "additionalProperties": false
+              },
+              "review_note": {"type": "string"},
+              "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+            },
+            "required": ["question_id", "verdict", "packet_sha256", "checks_confirmed", "independent_answer", "independent_solution", "answer_check", "solution_check", "knowledge_codes", "target_causes", "feature_codes", "grade", "difficulty", "question_type", "correction", "review_note", "confidence"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["reviewer", "items"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["status", "confidence", "escalation_reasons", "payload"],
+  "additionalProperties": false
+}

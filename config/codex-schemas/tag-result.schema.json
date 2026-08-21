@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "enum": ["complete", "needs_escalation", "unclear"]},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "escalation_reasons": {"type": "array", "items": {"type": "string"}},
+    "payload": {
+      "type": "object",
+      "properties": {
+        "schema": {"type": "string", "const": "math-question-tag-candidate/v1"},
+        "question_id": {"type": ["string", "null"]},
+        "knowledge_codes": {"type": "array", "items": {"type": "string"}},
+        "target_causes": {"type": "array", "items": {"type": "string"}},
+        "feature_codes": {"type": "array", "items": {"type": "string"}},
+        "grade": {"type": "integer", "enum": [10, 11, 12]},
+        "difficulty": {"type": "number", "minimum": 1, "maximum": 5},
+        "question_type": {"type": "string"},
+        "review_note": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "database_modified": {"type": "boolean", "const": false}
+      },
+      "required": ["schema", "question_id", "knowledge_codes", "target_causes", "feature_codes", "grade", "difficulty", "question_type", "review_note", "confidence", "database_modified"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["status", "confidence", "escalation_reasons", "payload"],
+  "additionalProperties": false
+}

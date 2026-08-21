@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "enum": ["complete", "needs_escalation", "unclear"]},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "escalation_reasons": {"type": "array", "items": {"type": "string"}},
+    "payload": {
+      "type": "object",
+      "properties": {
+        "schema": {"type": "string", "const": "math-reviewed-recommendations/v1"},
+        "error_id": {"type": "string"},
+        "reviewer": {"type": "string"},
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "question_id": {"type": "string"},
+              "score": {"type": "number", "minimum": 0, "maximum": 10},
+              "reason": {"type": "string"},
+              "model_confidence": {"type": "number", "minimum": 0, "maximum": 1}
+            },
+            "required": ["question_id", "score", "reason", "model_confidence"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["schema", "error_id", "reviewer", "items"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["status", "confidence", "escalation_reasons", "payload"],
+  "additionalProperties": false
+}

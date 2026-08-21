@@ -1,0 +1,117 @@
+{
+  "schema": "math-codex-model-routing/v1",
+  "profiles": {
+    "fast": {
+      "codex_profile": "math-fast",
+      "model": "gpt-5.6-luna",
+      "reasoning_effort": "low",
+      "verbosity": "low",
+      "rank": 1
+    },
+    "standard": {
+      "codex_profile": "math-standard",
+      "model": "gpt-5.6-terra",
+      "reasoning_effort": "medium",
+      "verbosity": "low",
+      "rank": 2
+    },
+    "expert": {
+      "codex_profile": "math-expert",
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "high",
+      "verbosity": "medium",
+      "rank": 3
+    }
+  },
+  "tasks": {
+    "tag": {
+      "profile": "fast",
+      "context_task": "maintenance",
+      "schema": "config/codex-schemas/tag-result.schema.json",
+      "minimum_confidence": 0.85,
+      "instruction": "为一个纯文本题目建议知识点、错因训练目标、结构特征、年级、难度和题型。只能使用项目已有代码，不得改题。"
+    },
+    "recommend": {
+      "profile": "fast",
+      "context_task": "recommend",
+      "schema": "config/codex-schemas/recommend-result.schema.json",
+      "minimum_confidence": 0.85,
+      "instruction": "只从输入的已验证候选中选择真正同错因、同结构且难度合适的题。共享主题词不足以证明同类型。"
+    },
+    "verify-simplified": {
+      "profile": "fast",
+      "reasoning_effort": "medium",
+      "context_task": "verify",
+      "schema": "config/codex-schemas/verify-result.schema.json",
+      "minimum_confidence": 0.9,
+      "instruction": "逐题执行简化审核：核对完整性、重复项、答案解析自洽、标签和来源。发现任何疑点时不得通过，必须请求升级为独立推导。"
+    },
+    "grade-text": {
+      "profile": "standard",
+      "context_task": "grade",
+      "schema": "config/codex-schemas/grade-result.schema.json",
+      "minimum_confidence": 0.9,
+      "instruction": "判定一题文字作答，定位第一处实质错误，给出完整正确解法和可执行的下一步。无直接证据不得归因为粗心。"
+    },
+    "grade-photo": {
+      "profile": "standard",
+      "context_task": "grade",
+      "schema": "config/codex-schemas/grade-result.schema.json",
+      "minimum_confidence": 0.9,
+      "instruction": "查看全部随附预览图，区分印刷题目与手写作答，判定一题并定位第一处实质错误。关键内容不清时不得补造。"
+    },
+    "review": {
+      "profile": "standard",
+      "context_task": "review",
+      "schema": "config/codex-schemas/grade-result.schema.json",
+      "minimum_confidence": 0.9,
+      "instruction": "判定一题复习作答并给出下一步。错误或部分正确时必须说明第一处实质错误和完整改正过程。"
+    },
+    "tutor": {
+      "profile": "standard",
+      "context_task": "review",
+      "schema": "config/codex-schemas/tutor-result.schema.json",
+      "minimum_confidence": 0.85,
+      "instruction": "根据已确认错因生成简短的苏格拉底式引导问题和递进提示，不提前泄露不必要的最终答案，并给出明确下一步。"
+    },
+    "verify-full": {
+      "profile": "expert",
+      "context_task": "verify",
+      "schema": "config/codex-schemas/verify-result.schema.json",
+      "minimum_confidence": 0.92,
+      "instruction": "逐题独立推导，核对题干、答案、解析、标签、来源和重复项。不得依据来源信誉或外部 verified 字段直接通过。"
+    },
+    "repair": {
+      "profile": "expert",
+      "context_task": "verify",
+      "schema": "config/codex-schemas/verify-result.schema.json",
+      "minimum_confidence": 0.92,
+      "instruction": "独立推导并修复已确认存在截断、答案冲突或解析缺失的题目。没有充分证据时保持 needs_revision，不得补造。"
+    },
+    "adjudicate": {
+      "profile": "expert",
+      "reasoning_effort": "xhigh",
+      "context_task": "verify",
+      "schema": "config/codex-schemas/verify-result.schema.json",
+      "minimum_confidence": 0.95,
+      "instruction": "对争议题进行最终独立裁决，明确证据、限制和结论。无法唯一确定时保持 needs_revision 或 reject。"
+    },
+    "generate": {
+      "profile": "expert",
+      "context_task": "recommend",
+      "schema": "config/codex-schemas/generated-question-result.schema.json",
+      "minimum_confidence": 0.92,
+      "instruction": "仅在题库缺少合适候选时生成一道完整高中数学题和解析。必须标记为模型生成且未验证，不得直接进入已验证题库。"
+    }
+  },
+  "risks": {
+    "visual": "standard",
+    "ambiguous_visual": "expert",
+    "answer_conflict": "expert",
+    "incomplete": "expert",
+    "proof": "expert",
+    "complex_diagram": "expert",
+    "multiple_cases": "expert",
+    "generated": "expert"
+  }
+}

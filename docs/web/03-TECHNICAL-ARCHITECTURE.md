@@ -80,6 +80,7 @@ Web 应用在进入业务函数前构造不可变的 `RequestContext(user_id, te
 
 ### 5.2 MySQL 基线
 
+- 技术选型已确定为 MySQL，不保留第二套 PostgreSQL/其他关系型数据库适配层。
 - 数据库版本：RDS MySQL 8.0。
 - 默认字符集：`utf8mb4`。
 - 业务文本使用适合中文的 `utf8mb4` 排序规则。

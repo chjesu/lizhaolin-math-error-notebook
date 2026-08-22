@@ -423,6 +423,28 @@ class NotebookTests(unittest.TestCase):
         self.assertIn("answer", packet["items"][0])
         self.assertIn("solution", packet["items"][0])
 
+    def test_recommendation_packet_can_include_assigned_for_evaluation(self):
+        error_id = self.create_error()
+        first_path = self.root / "recommendation-packet-first.json"
+        notebook.recommendation_packet(
+            self.conn, error_id, 1, self.root, None, None, first_path
+        )
+        first = json.loads(first_path.read_text(encoding="utf-8"))["items"]
+        notebook.assign_recommendations(
+            self.conn, error_id, first, self.root, False
+        )
+        evaluation_path = self.root / "recommendation-packet-evaluation.json"
+        notebook.recommendation_packet(
+            self.conn, error_id, 5, self.root, None, None, evaluation_path,
+            include_assigned=True,
+        )
+        evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+        self.assertTrue(evaluation["retrieval"]["include_assigned"])
+        self.assertIn(
+            first[0]["question_id"],
+            [item["question_id"] for item in evaluation["items"]],
+        )
+
     def test_recommendation_local_keyword_split_and_placeholder_filter(self):
         self.assertEqual(
             notebook.normalize_recommendation_keywords(["双曲线 离心率，焦点"]),
@@ -466,6 +488,62 @@ class NotebookTests(unittest.TestCase):
             "填空题",
         )
         self.assertIn("norm-dot-product", vector_features)
+
+    def test_knowledge_inference_disambiguates_circle_and_calculus_tangents(self):
+        calculus = notebook.infer_knowledge(
+            "已知函数 f(x)=x\\ln x，求曲线在 x=1 处的切线方程。"
+        )
+        circle = notebook.infer_knowledge(
+            "求经过点 A 且与直线 l 相切于点 B 的圆的方程。"
+        )
+        self.assertIn("derivatives", calculus)
+        self.assertNotIn("line-circle", calculus)
+        self.assertIn("line-circle", circle)
+        self.assertNotIn("derivatives", circle)
+        self.assertFalse(notebook.has_circle_context("椭圆与直线相交"))
+        self.assertTrue(notebook.has_circle_context("圆与直线相交"))
+
+    def test_recommendation_semantic_filter_rejects_cross_domain_tangent(self):
+        target = "求经过点 A 且与直线 l 相切于点 B 的圆的方程。"
+        calculus = "已知函数 f(x)=x\\ln x，求曲线在 x=1 处的切线方程。"
+        circle = "圆 C 经过点 P，且在点 Q 处与直线 l 相切，求圆 C 的方程。"
+        self.assertTrue(notebook.recommendation_semantic_conflict(target, calculus))
+        self.assertFalse(notebook.recommendation_semantic_conflict(target, circle))
+        self.assertGreater(
+            notebook.recommendation_semantic_similarity(target, circle),
+            notebook.recommendation_semantic_similarity(target, calculus),
+        )
+
+    def test_recommendation_semantic_filter_requires_strict_operation_match(self):
+        chord_target = "过圆内一点作割线，使圆截得的弦长最短。"
+        area_candidate = "点在圆上运动，求三角形面积的最大值。"
+        chord_candidate = "过圆内一点的弦中，求长度最短的弦所在直线。"
+        self.assertTrue(
+            notebook.recommendation_semantic_conflict(chord_target, area_candidate)
+        )
+        self.assertFalse(
+            notebook.recommendation_semantic_conflict(chord_target, chord_candidate)
+        )
+
+    def test_recommendation_semantic_vector_covers_reviewed_operation_pairs(self):
+        tangent_target = "过点P作圆M的两条切线，切点为A、B，直线AB经过哪个定点？"
+        tangent_candidate = "过动点P作圆O的两条切线，切点A、B，求直线AB所过定点。"
+        area_target = "点C在圆上，三角形ABC面积满足条件，求点C的个数。"
+        area_candidate = "点C在圆上，求三角形ABC面积的最小值。"
+        vector_target = "已知A点坐标和向量a，若向量AB=2a，求B点坐标。"
+        vector_candidate = "已知空间向量a、b平行，由坐标分量求m+n。"
+        for target, candidate in (
+            (tangent_target, tangent_candidate),
+            (area_target, area_candidate),
+            (vector_target, vector_candidate),
+        ):
+            self.assertFalse(notebook.recommendation_semantic_conflict(target, candidate))
+            self.assertGreater(notebook.recommendation_semantic_similarity(target, candidate), 0.45)
+
+    def test_recommendation_semantic_vector_rejects_ellipse_as_circle(self):
+        target = "点C在圆上，三角形ABC面积满足条件，求点C的个数。"
+        ellipse = "直线交椭圆于A、B，求三角形ABC面积的最大值。"
+        self.assertTrue(notebook.recommendation_semantic_conflict(target, ellipse))
 
     def test_recommendation_auto_ranking_filters_duplicates_and_language_mismatch(self):
         analysis = {

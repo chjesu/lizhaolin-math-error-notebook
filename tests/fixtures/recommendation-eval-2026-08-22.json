@@ -1,0 +1,30 @@
+{
+  "schema": "math-recommendation-eval/v1",
+  "description": "2026-08-22 每日复习 PDF 中六组错误或过宽推荐的人工复核基准。",
+  "cases": [
+    {
+      "error_id": "ERR-20260726-f0fe1fe0",
+      "accepted_question_ids": ["Q-b5dfc956ab90", "Q-df736c1d481f"]
+    },
+    {
+      "error_id": "ERR-20260726-76d62a20",
+      "accepted_question_ids": ["Q-ae0d37c4170c"]
+    },
+    {
+      "error_id": "ERR-20260726-aa54e499",
+      "accepted_question_ids": ["Q-79b6632d7d04"]
+    },
+    {
+      "error_id": "ERR-20260718-be4c7e1e",
+      "accepted_question_ids": ["Q-f1676c3d856f"]
+    },
+    {
+      "error_id": "ERR-20260719-c1e70361",
+      "accepted_question_ids": ["Q-c0a81853c8ee"]
+    },
+    {
+      "error_id": "ERR-20260719-ebad6968",
+      "accepted_question_ids": ["Q-653ca4d34820"]
+    }
+  ]
+}

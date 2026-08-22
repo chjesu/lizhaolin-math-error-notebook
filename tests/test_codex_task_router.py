@@ -4,7 +4,9 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,6 +74,26 @@ class CodexTaskRouterTests(unittest.TestCase):
             prompt = router.build_prompt(route, compact, None, 0)
             self.assertIn('输入数据：{"question":{"stem":"x^2"}}', prompt)
             self.assertNotIn(str(path), prompt)
+
+    def test_run_pins_routed_model_above_project_default(self) -> None:
+        route = router.select_route(
+            self.config, "grade-photo", risks=["ambiguous_visual"], has_images=True
+        )
+
+        def fake_run(command: list[str], **_: object) -> SimpleNamespace:
+            self.assertEqual(command[command.index("-m") + 1], "gpt-5.6-sol")
+            result_path = Path(command[command.index("-o") + 1])
+            result_path.write_text(
+                '{"status":"complete","confidence":1,"escalation_reasons":[],"payload":{}}',
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+        with patch.object(router, "codex_binary", return_value="codex"), patch.object(
+            router.subprocess, "run", side_effect=fake_run
+        ):
+            result, _ = router.run_codex_once(route, "prompt", [], 30, None)
+        self.assertEqual(result["status"], "complete")
 
     def test_tag_catalogs_come_from_authoritative_project_assets(self) -> None:
         catalogs = router.local_catalogs()

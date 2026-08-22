@@ -10,7 +10,8 @@ description: Manage a Chinese high-school math error notebook with Codex and one
 - An installed copy binds to `LIZHAOLIN_MATH_NOTEBOOK_ROOT` when set; otherwise it uses the nearest parent containing `data/math_notebook.db` or a project-local copy of this Skill. If neither exists, it uses the current directory so `init` can create a new notebook. Never search for another database after binding.
 - On Windows PowerShell, always pass `-Encoding UTF8` to `Get-Content`, and run Python entry points with `-X utf8`; do not guess encodings after mojibake appears.
 - Start routine work with one compact, read-only call: `scripts/notebook.py agent-context --task grade|recommend|verify|import|review|pdf|maintenance --json`. Use `doctor --json` for environment health and `handoff --json` for a compact transfer snapshot.
-- Use image input directly for photos; never claim to switch models/providers. The default preflight only controls image size locally, and the current remote vision-capable model must inspect every returned preview.
+- This project defaults the GUI orchestrator to Luna/low. For every bounded task that needs mathematical or visual judgment, call `scripts/codex_task_router.py`; its explicit model selection may promote the task to Terra or Sol. Deterministic extraction, preflight, validation, and database writes still go directly through the existing scripts without a model call.
+- For photos, run the local size-only preflight and attach every relevant returned preview to `codex_task_router.py run --task grade-photo`. A direct review by the current GUI model is only a disclosed fallback when the router is unavailable.
 - Text-only models, including DeepSeek sessions without image input, must hand photo grading to a vision-capable model; they must not infer unseen handwriting from filenames or OCR remnants.
 - Run deterministic work through `scripts/notebook.py`. Its project installation binds to the sole bank `data/math_notebook.db`; never discover, merge, copy over, or select another same-named DB.
 - For bounded Codex CLI model tasks, use `scripts/codex_task_router.py`: Luna handles high-throughput tagging, recommendation review, and simplified verification; Terra handles routine grading and tutoring; Sol handles full derivation, repair, generation, and adjudication. The router runs read-only, validates JSON Schema output, and never writes the database.
@@ -53,8 +54,13 @@ operation.
 python -B <skill-dir>\scripts\notebook.py photo-preflight <image...> --json
 ```
 
-The command does not run OCR or a local visual model. `review_route=remote_model_visual_review` means the preview must be viewed,
-not merely read as a path. Use the compact result directly; routine grading must
+The command does not run OCR or a local visual model. `review_route=remote_model_visual_review` means every preview must be attached to and viewed by the router-selected vision-capable model, not merely read as a path. Run a bounded task with:
+
+```powershell
+python -X utf8 -B <skill-dir>\scripts\codex_task_router.py run --task grade-photo --input <evidence.json> --image <preview...> --out <grade-result.json> --json
+```
+
+Use the compact preflight result directly; routine grading must
 not read the full packet. When a printed question ID is visible, load only
 `question <id> --compact --json`; request the full item only if its solution is
 genuinely needed.
@@ -153,6 +159,14 @@ automatic re-recommendation. Change the status back to `assigned` after learning
 Read `references/import-and-verification.md` only for question import, source repair, coverage audit, or verification work. Use `prepare-audit-batch` to create per-item `audit-item` packets and safe pending review skeletons, then complete each review and call `verify-item`; the preparation command never changes verification state. To reduce repeated output, expand concise, reviewed decisions with `prepare-review-batch`, then submit the resulting item-level reviews with `verify-review-batch`; both reuse the same quality gate. For the user-confirmed reliable batch `2026-07-19-g11-beijing-20` and high-quality exam questions imported on or after `2026-07-20`, a full independent re-solve of every question may be skipped. Use `audit-summary` for the eligible count and `audit-queue/prepare-audit-batch --simplified-only` for the eligible queue. Every item still requires checks of completeness, duplicates, answer/solution consistency, tags, provenance, and a recorded `audit-item → verify-item` review; any inconsistency restores the independent-derivation requirement. For older sources, external `verified` values, source reputation, sampling, and bulk SQL never justify verification.
 
 ## Review and progress
+
+The Ebbinghaus forgetting curve is the core scheduling principle: correcting an
+error once is not mastery. Require active recall instead of rereading answers,
+and do not present fixed retention percentages as universal facts. New and
+wrong-result cycles use days 1, 2, 4, 7, 15, and 30; partial-result cycles use
+days 1, 3, 7, 15, 30, and 45. Completing a stage correctly shifts the remaining
+stages from the actual completion date, so the interval grows from demonstrated
+recall rather than from the original plan date.
 
 Use `daily-review-packet --limit 12 --out <packet.json> --json` to expose at most one actionable stage per active error. Later planned stages never count as additional backlog: an overdue error remains one task with `overdue_days`, and completing its current stage shifts the rest of that cycle from the actual completion date. Stages 1-2 include the original plus two same-level reviewed recommendations, stages 3-4 include the original plus one reviewed variation, and stages 5-6 include the original plus one reviewed recommendation with a preference for slightly higher difficulty. Only saved, reviewed, verified recommendations enter its printable section; resolve any reported recommendation gaps before PDF generation. Generate one questions-only review PDF with `practice_sheet.py --daily-packet <packet.json>`. Its layout is fixed: main numbers count error groups, each group heading shows `错题编号`, current stage, and overdue state before `错题回顾`; nested exercises are labeled `同类型推荐题 1/2` with `题库编号`, difficulty, recommendation reason, and source in stable positions. A second recommendation never consumes another main number; the next main number begins only at the next error group. Do not replace this hierarchy with flat per-question numbering. Use `due --json`, `review <error-id> --result correct|partial|wrong`, `stats --json`, and `coverage --json`. Wrong/partial review starts an adaptive cycle. If the latest review itself was misgraded, use `correct-review <error-id> --result correct|partial|wrong`; it corrects that row and repairs the schedule instead of advancing a second stage. When the user explicitly confirms an error is mastered, use `master-error <error-id> --json` to retain completed review history while cancelling only its pending stages.
 

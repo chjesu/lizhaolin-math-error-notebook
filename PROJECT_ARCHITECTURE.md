@@ -11,7 +11,7 @@
 - 错题记录：`25`；到期复习阶段：`110`
 - 主执行器：`.agents/skills/math-error-notebook/scripts/notebook.py`
 - 组卷与打印：`.agents/skills/math-error-notebook/scripts/practice_sheet.py`
-- 照片视觉预检：`notebook.py photo-preflight`（只做 EXIF 方向、透明底白底化、尺寸压缩与缓存，远端视觉模型直接看全部预览）
+- 照片视觉预检：`notebook.py photo-preflight`（只做 EXIF 方向、透明底白底化、尺寸压缩与缓存，路由器选出的视觉模型查看全部相关预览）
 - 默认打印机：`EPSON72097C (L3250 Series)`
 
 数量是 2026-08-08 的实施前快照；实际状态以 `bank-info --json` 为准。
@@ -54,7 +54,7 @@ flowchart LR
 ```mermaid
 flowchart TD
     IMG["错题照片/文字"] --> PRE["photo-preflight：本地仅做方向、白底与尺寸控制"]
-    PRE --> G["远端视觉模型查看全部标准化预览，区分印刷内容与手写步骤"]
+    PRE --> G["路由器选出的视觉模型查看全部标准化预览，区分印刷内容与手写步骤"]
     G --> W["定位第一处实质性错误"]
     W --> J["填写 error-analysis-template.json"]
     J --> RE["record-error"]
@@ -120,7 +120,7 @@ flowchart LR
 
 新智能体不得创建第二套数据库访问层、推荐器、PDF生成器或验证器。可复用功能应扩展权威入口，并补充 `tests/test_notebook.py`。
 
-Skill 只有一个安装包：`.agents/skills/math-error-notebook`。Codex CLI 模型任务统一通过包内 `scripts/codex_task_router.py` 在 Luna、Terra 和 Sol 之间路由；安装版按
+Skill 只有一个安装包：`.agents/skills/math-error-notebook`。项目级 `.codex/config.toml` 将 GUI 新任务默认设为 Luna/low；GUI 只负责编排，所有需要模型判断的有边界任务统一通过包内 `scripts/codex_task_router.py` 在 Luna、Terra 和 Sol 之间路由。路由器显式固定每次实际选择的模型，避免项目默认覆盖 Terra/Sol 路线；确定性导入、预检和写库步骤不调用模型。安装版按
 `LIZHAOLIN_MATH_NOTEBOOK_ROOT`、当前目录向上的主库/项目标记、当前目录的顺序绑定项目；绑定后仍只使用该项目的 `data/math_notebook.db`，不会跨磁盘发现题库。
 
 ## 5. `notebook.py` 全部 CLI 功能
@@ -134,7 +134,7 @@ Skill 只有一个安装包：`.agents/skills/math-error-notebook`。Codex CLI �
 | 智能体交接 | `handoff` | 精简输出主库哈希、验证数量、主要问题、复习任务和 Git 状态 |
 | 行为标准 | `behavior-cases` | 按任务列出跨模型标准案例；只在需要时加载单个完整案例 |
 | 可恢复流程 | `workflow-start` / `workflow-update` / `workflow-status` | 在 `data/workflows/` 保存步骤、产物和断点，不重复已完成阶段 |
-| 照片预检 | `photo-preflight` | 仅做 EXIF 方向、透明底白底化、JPEG 编码、尺寸控制和内容哈希缓存；精简返回全部 `preview_paths` 与 `review_route=remote_model_visual_review`，由远端视觉模型逐页查看 |
+| 照片预检 | `photo-preflight` | 仅做 EXIF 方向、透明底白底化、JPEG 编码、尺寸控制和内容哈希缓存；精简返回全部 `preview_paths` 与 `review_route=remote_model_visual_review`，由路由器选出的视觉模型逐页查看 |
 | 初始化 | `init` | 创建 schema、装载知识点；主库存在时不得用来重建数据 |
 | 初始化 | `seed` | 幂等导入项目原创种子题，仅用于首次建库 |
 | 题库身份 | `bank-info` | 主库绝对路径、SHA256、schema、完整性、外键和数量 |
@@ -376,7 +376,7 @@ PowerShell 读取项目文本必须显式使用 `Get-Content -Encoding UTF8`，P
 
 固定流程：
 
-- 判题：`photo-preflight --task grade（本地仅规范化与缓存） → 远端视觉模型打开全部 preview_paths → question --compact（题号可见时） → grade-preview → grade-commit`；项目不启动本地识别模型，也不得整包读取 `photo-preflight.json`
+- 判题：`photo-preflight --task grade（本地仅规范化与缓存） → codex_task_router.py run --task grade-photo（附全部相关 preview_paths） → question --compact（题号可见时） → grade-preview → grade-commit`；项目不启动本地识别模型，也不得整包读取 `photo-preflight.json`
 - 推荐：`recommend-packet --limit 3 → 模型只复核精简题干 → assign-recommendations <同一packet>`；仅对个别疑难候选调用 `question <id>`，不再默认加载全部答案与长解析
 - 每日复习：`daily-review-packet → 补齐缺少的已复核推荐 → practice_sheet.py --daily-packet`；每题只暴露一个当前阶段，积压只增加 `overdue_days`，完成后按实际完成日顺延后续阶段
 - 批量 DOCX：`import_recent_docx_batch.py → audit_recent_docx_batch.py`

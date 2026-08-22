@@ -9,6 +9,7 @@ import difflib
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -122,6 +123,9 @@ RECOMMENDATION_AUTO_TERMS = (
 RECOMMENDATION_MODES = ("auto", "same-level", "variation", "transfer")
 RECOMMENDATION_FORMAT_FEATURES = {
     "single-choice", "multiple-choice", "fill-blank", "solution", "proof", "multi-part",
+}
+RECOMMENDATION_STRICT_OPERATIONS = {
+    "circle-tangent", "circle-chord", "circle-area-distance", "vector-coordinate",
 }
 MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 WORKFLOW_STEPS: dict[str, tuple[str, ...]] = {
@@ -359,9 +363,26 @@ KEYWORD_RULES: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 
+def has_circle_context(text: str) -> bool:
+    """Return whether text refers to a plane circle rather than a conic/solid word."""
+    normalized = (text or "").casefold()
+    for term in ("圆锥曲线", "椭圆", "圆锥", "圆柱", "圆台", "球面"):
+        normalized = normalized.replace(term, "")
+    return "圆" in normalized or "circle" in normalized
+
+
 def infer_knowledge(stem: str) -> list[str]:
     lower = stem.lower()
     codes = [code for code, terms in KEYWORD_RULES if any(term.lower() in lower for term in terms)]
+    circle_context = has_circle_context(lower)
+    calculus_context = bool(re.search(
+        r"函数|导数|单调区间|极值|f\s*\(|[fgh]\s*['′’]?\s*\(|\\ln|\\log|e\^",
+        lower,
+    ))
+    if calculus_context and not circle_context:
+        codes = [code for code in codes if code != "line-circle"]
+    if circle_context and not calculus_context:
+        codes = [code for code in codes if code != "derivatives"]
     return codes[:3]
 
 
@@ -1221,6 +1242,117 @@ def contains_cjk(value: str) -> bool:
     return bool(re.search(r"[\u3400-\u9fff]", value or ""))
 
 
+def recommendation_semantic_vector(stem: str) -> dict[str, float]:
+    """Build a tiny, auditable math-operation vector without model dependencies."""
+    text = (stem or "").casefold()
+    compact = re.sub(r"[$\s{}]", "", text)
+    vector: dict[str, float] = {}
+
+    def add(code: str, weight: float) -> None:
+        vector[code] = max(weight, vector.get(code, 0.0))
+
+    circle = has_circle_context(text)
+    calculus = bool(re.search(
+        r"函数|导数|单调区间|极值|f\s*\(|[fgh]\s*['′’]?\s*\(|\\ln|\\log|e\^",
+        text,
+    ))
+    vector_context = "向量" in text or "\\vec" in text or "\\overrightarrow" in text
+    solid = any(term in text for term in ("正方体", "长方体", "棱柱", "棱锥", "平面", "二面角"))
+    domains = {
+        "domain:circle": circle,
+        "domain:calculus": calculus,
+        "domain:vector": vector_context,
+        "domain:solid": solid,
+        "domain:ellipse": "椭圆" in text,
+        "domain:hyperbola": "双曲线" in text,
+        "domain:parabola": "抛物线" in text,
+        "domain:trig": bool(re.search(r"正弦|余弦|正切|\\sin|\\cos|\\tan", text)),
+    }
+    for code, present in domains.items():
+        if present:
+            add(code, 4.0)
+
+    tangent = any(term in text for term in ("相切", "切线", "切点"))
+    chord = any(term in text for term in ("弦长", "弦", "割线", "截得的线段"))
+    if circle and tangent:
+        add("circle-tangent", 6.0)
+        if any(term in compact for term in ("相切于点", "切点为", "切点分别为")):
+            add("circle-tangent-at-point", 7.0)
+    if circle and chord:
+        add("circle-chord", 6.0)
+        if any(term in text for term in ("过点", "内一点", "定点")):
+            add("circle-chord-through-point", 7.0)
+    if circle and "面积" in text and any(term in text for term in ("个数", "几个", "满足条件")):
+        add("circle-area-count", 6.0)
+    if circle and "面积" in text and any(term in text for term in ("三角形", "\\triangle")):
+        add("circle-area-distance", 6.0)
+        if any(term in text for term in ("面积为", "满足条件")):
+            add("circle-area-given", 7.0)
+    if circle and "两条切线" in text and "切点" in text:
+        add("circle-two-tangents", 7.0)
+        if any(term in compact for term in ("直线ab", "直线mn", "切点弦")):
+            add("circle-chord-contact", 8.0)
+    if calculus and tangent:
+        add("calculus-tangent", 6.0)
+    if vector_context and (
+        "坐标" in text
+        or bool(re.search(r"[a-z]\s*\([^)]*,[^)]*\)", text))
+        or "\\overrightarrow{ab}" in compact
+    ):
+        add("vector-coordinate", 6.0)
+        if any(term in compact for term in (
+            "\\overrightarrow{ab}=", "m+n", "平行", "共线", "倍", "2\\vec",
+        )):
+            add("vector-component", 5.0)
+    if vector_context and any(term in text for term in ("数量积", "内积", "\\cdot", "\\perp", "垂直")):
+        add("vector-dot", 5.0)
+    if any(term in text for term in ("焦点", "准线")):
+        add("conic-focus", 5.0)
+    if "离心率" in text:
+        add("conic-eccentricity", 5.0)
+    if any(term in text for term in ("最大值", "最小值", "最值")):
+        add("operation-extremum", 3.0)
+    if any(term in text for term in ("方程", "求实数", "求参数")):
+        add("operation-reverse-solve", 2.0)
+    for keyword in automatic_recommendation_keywords(stem):
+        add(f"keyword:{keyword}", 1.0)
+    return vector
+
+
+def recommendation_semantic_similarity(target_stem: str, candidate_stem: str) -> float:
+    target = recommendation_semantic_vector(target_stem)
+    candidate = recommendation_semantic_vector(candidate_stem)
+    if not target or not candidate:
+        return 0.0
+    numerator = sum(weight * candidate.get(code, 0.0) for code, weight in target.items())
+    target_norm = math.sqrt(sum(weight * weight for weight in target.values()))
+    candidate_norm = math.sqrt(sum(weight * weight for weight in candidate.values()))
+    return numerator / (target_norm * candidate_norm) if target_norm and candidate_norm else 0.0
+
+
+def recommendation_semantic_conflict(target_stem: str, candidate_stem: str) -> bool:
+    """Fail closed on unmistakable domain or strict-operation mismatches."""
+    target = recommendation_semantic_vector(target_stem)
+    candidate = recommendation_semantic_vector(candidate_stem)
+    target_domains = {code for code in target if code.startswith("domain:")}
+    candidate_domains = {code for code in candidate if code.startswith("domain:")}
+    if "domain:circle" in target_domains and "domain:calculus" in candidate_domains and "domain:circle" not in candidate_domains:
+        return True
+    if "domain:circle" in target_domains and not target_domains.intersection(candidate_domains):
+        return True
+    if "domain:circle" in target_domains and any(
+        code in candidate_domains
+        for code in ("domain:ellipse", "domain:hyperbola", "domain:parabola")
+    ) and "domain:circle" not in candidate_domains:
+        return True
+    if "domain:calculus" in target_domains and "domain:circle" in candidate_domains and "domain:calculus" not in candidate_domains:
+        return True
+    target_strict = target.keys() & RECOMMENDATION_STRICT_OPERATIONS
+    if target_strict and not target_strict.intersection(candidate):
+        return True
+    return False
+
+
 def recommendation_candidate_is_usable(
     row: sqlite3.Row, target_stem: str | None = None
 ) -> bool:
@@ -1250,6 +1382,8 @@ def recommendation_candidate_is_usable(
             ).ratio()
             if similarity >= 0.97:
                 return False
+        if recommendation_semantic_conflict(target_stem, stem):
+            return False
     return True
 
 
@@ -1361,6 +1495,7 @@ def recommend(
         keywords = automatic_recommendation_keywords(error["problem_text"])
     text_ranks = fts_candidate_ranks(conn, keywords)
     target_features = error_feature_codes(error, features)
+    target_semantic_vector = recommendation_semantic_vector(error["problem_text"])
     resolved_mode = resolve_recommendation_mode(conn, error_id, mode)
     if save and replace:
         conn.execute("DELETE FROM recommendations WHERE error_id=?", (error_id,))
@@ -1378,9 +1513,11 @@ def recommend(
               AND NOT EXISTS (
                   SELECT 1 FROM attempts a WHERE a.question_id=q.id
               )
-              AND q.id NOT IN (SELECT question_id FROM recommendations WHERE error_id=?)
+              AND (?=1 OR q.id NOT IN (
+                  SELECT question_id FROM recommendations WHERE error_id=?
+              ))
             GROUP BY q.id""",
-        (error["cause_code"], *codes, error["question_id"], error_id),
+        (error["cause_code"], *codes, error["question_id"], int(replace), error_id),
     ))
     rows = [
         row for row in rows
@@ -1416,7 +1553,13 @@ def recommend(
             max(0.0, 3.0 - 0.01 * text_ranks.get(row["id"], 300))
             if row["id"] in text_ranks else 0.0
         )
-        return 5.0 * row["overlap"] + keyword_score + feature_score + text_score
+        semantic_score = recommendation_semantic_similarity(
+            error["problem_text"], row["stem"] or ""
+        )
+        return (
+            5.0 * row["overlap"] + keyword_score + feature_score + text_score
+            + 8.0 * semantic_score
+        )
 
     pool_size = min(len(rows), max(50, limit * 10))
     rows = sorted(rows, key=retrieval_score, reverse=True)[:pool_size]
@@ -1444,6 +1587,11 @@ def recommend(
             reason_parts.append(f"题型关键词：{', '.join(matched_keywords)}")
         if best["id"] in text_ranks:
             reason_parts.append("全文检索：题干语义片段匹配")
+        semantic_score = recommendation_semantic_similarity(
+            error["problem_text"], best["stem"] or ""
+        )
+        if semantic_score >= 0.15 and target_semantic_vector:
+            reason_parts.append(f"语义操作向量：{semantic_score:.2f}")
         matched_features = sorted(candidate_features(best).intersection(target_features))
         if matched_features:
             labels = [FEATURE_CODES[code] for code in matched_features]
@@ -3572,6 +3720,7 @@ def recommendation_packet(
     out_path: Path,
     full: bool = False,
     mode: str = "auto",
+    include_assigned: bool = False,
 ) -> dict[str, Any]:
     error, _ = fetch_error(conn, error_id)
     normalized_keywords = normalize_recommendation_keywords(keywords)
@@ -3581,7 +3730,8 @@ def recommendation_packet(
     )
     resolved_mode = resolve_recommendation_mode(conn, error_id, mode)
     items = recommend(
-        conn, error_id, limit, False, project_root, keywords, False, full, features, mode
+        conn, error_id, limit, False, project_root, keywords, include_assigned,
+        full, features, mode
     )
     packet = {
         "schema": "math-recommendation-review-packet/v1",
@@ -3594,6 +3744,7 @@ def recommendation_packet(
             "keywords": effective_keywords,
             "feature_codes": error_feature_codes(error, features),
             "mode": resolved_mode,
+            "include_assigned": include_assigned,
             "strategy": "verified_filters_then_local_recall_then_stage_ranking",
         },
         "review_hint": (
@@ -3812,6 +3963,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mode", choices=RECOMMENDATION_MODES, default="auto")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--full", action="store_true", help="include answers and solutions only when needed")
+    p.add_argument(
+        "--include-assigned",
+        action="store_true",
+        help="include currently assigned recommendations for reproducible evaluation",
+    )
     p.add_argument("--project-root", type=Path, default=Path.cwd())
     p.add_argument("--json", action="store_true")
 
@@ -4158,6 +4314,7 @@ def main(argv: list[str] | None = None) -> int:
                 payload = recommendation_packet(
                     conn, args.error_id, max(1, min(args.limit, 10)), args.project_root,
                     args.keyword, args.feature, args.out, args.full, args.mode,
+                    args.include_assigned,
                 )
             elif args.command == "recommend-eval":
                 payload = evaluate_recommendation_packets(

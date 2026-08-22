@@ -160,6 +160,14 @@ Read `references/import-and-verification.md` only for question import, source re
 
 ## Review and progress
 
+The Ebbinghaus forgetting curve is the core scheduling principle: correcting an
+error once is not mastery. Require active recall instead of rereading answers,
+and do not present fixed retention percentages as universal facts. New and
+wrong-result cycles use days 1, 2, 4, 7, 15, and 30; partial-result cycles use
+days 1, 3, 7, 15, 30, and 45. Completing a stage correctly shifts the remaining
+stages from the actual completion date, so the interval grows from demonstrated
+recall rather than from the original plan date.
+
 Use `daily-review-packet --limit 12 --out <packet.json> --json` to expose at most one actionable stage per active error. Later planned stages never count as additional backlog: an overdue error remains one task with `overdue_days`, and completing its current stage shifts the rest of that cycle from the actual completion date. Stages 1-2 include the original plus two same-level reviewed recommendations, stages 3-4 include the original plus one reviewed variation, and stages 5-6 include the original plus one reviewed recommendation with a preference for slightly higher difficulty. Only saved, reviewed, verified recommendations enter its printable section; resolve any reported recommendation gaps before PDF generation. Generate one questions-only review PDF with `practice_sheet.py --daily-packet <packet.json>`. Its layout is fixed: main numbers count error groups, each group heading shows `错题编号`, current stage, and overdue state before `错题回顾`; nested exercises are labeled `同类型推荐题 1/2` with `题库编号`, difficulty, recommendation reason, and source in stable positions. A second recommendation never consumes another main number; the next main number begins only at the next error group. Do not replace this hierarchy with flat per-question numbering. Use `due --json`, `review <error-id> --result correct|partial|wrong`, `stats --json`, and `coverage --json`. Wrong/partial review starts an adaptive cycle. If the latest review itself was misgraded, use `correct-review <error-id> --result correct|partial|wrong`; it corrects that row and repairs the schedule instead of advancing a second stage. When the user explicitly confirms an error is mastered, use `master-error <error-id> --json` to retain completed review history while cancelling only its pending stages.
 
 ## Local full-text retrieval

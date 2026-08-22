@@ -363,6 +363,12 @@ math-error-notebook/
 
 只有以下情况适合增加代码：现有入口确实无法表达需求；功能可重复使用；不会绕过质量门；明确归属到现有模块；同时增加回归测试和本文索引。
 
+## Web 多用户分支
+
+Web 版的产品、架构、安全、实施和任务分工基线统一位于 `docs/web/`。它复用本项目题库、审核、判题、推荐和 PDF 质量门，不复制 `data/math_notebook.db` 或创建平行领域逻辑。目标部署为阿里云上的无状态 Web/API/Worker、独立 MySQL 8 和私有 OSS；首版以 MySQL 保存验证码、限流、任务和审计状态，只有达到文档中的量化门槛后才评估 Redis 或向量检索。
+
+手机号验证码注册的确定性安全内核位于 `services/web_auth/registration.py`，MySQL 迁移骨架位于 `services/web_auth/migrations/0001_phone_registration.sql`，回归入口为 `tests/test_web_auth_registration.py`。模型不得参与实时验证码发送、验证码判断、会话签发或风控放行；Codex CLI 仅通过现有路由器执行 `web-requirements`、`web-implementation`、`web-security-review` 等只读候选审查任务。
+
 ## 12. 智能体低 Token 快速路径
 
 常规任务不再人工拼接预检、审核包或交接摘要。先运行：

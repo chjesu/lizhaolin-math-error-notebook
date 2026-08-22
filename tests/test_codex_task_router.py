@@ -48,6 +48,18 @@ class CodexTaskRouterTests(unittest.TestCase):
         route = router.select_route(self.config, "adjudicate")
         self.assertEqual((route["model"], route["reasoning_effort"]), ("gpt-5.6-sol", "xhigh"))
 
+    def test_web_work_is_routed_by_risk(self) -> None:
+        requirements = router.select_route(self.config, "web-requirements")
+        implementation = router.select_route(self.config, "web-implementation")
+        security = router.select_route(self.config, "web-security-review")
+        promoted = router.select_route(
+            self.config, "web-implementation", risks=["authentication"]
+        )
+        self.assertEqual(requirements["model"], "gpt-5.6-luna")
+        self.assertEqual(implementation["model"], "gpt-5.6-terra")
+        self.assertEqual(security["model"], "gpt-5.6-sol")
+        self.assertEqual(promoted["model"], "gpt-5.6-sol")
+
     def test_profile_installation_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory)

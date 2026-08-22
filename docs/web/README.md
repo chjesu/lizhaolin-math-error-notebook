@@ -16,6 +16,7 @@
 | [04-IMPLEMENTATION-PLAN.md](./04-IMPLEMENTATION-PLAN.md) | 分批实施、迁移、灰度和完成证据 | v0.2.0 | 开发中 |
 | [05-TEST-ACCEPTANCE-OPERATIONS.md](./05-TEST-ACCEPTANCE-OPERATIONS.md) | 安全测试、验收门禁、监控和事件处置 | v0.2.0 | 已确认 |
 | [06-WORKBREAKDOWN-CODEX-WORKFLOW.md](./06-WORKBREAKDOWN-CODEX-WORKFLOW.md) | 角色、领取分工、可恢复流程和模型路由 | v0.2.0 | 已确认 |
+| [07-SMS-PROVIDER-RUICHENG.md](./07-SMS-PROVIDER-RUICHENG.md) | 瑞成云适配、密钥、网络和上线约束 | v0.2.0 | 开发中 |
 
 ## v0.2.0 产品基线
 

@@ -97,6 +97,32 @@ class RegistrationServiceTests(unittest.TestCase):
         passed = self.request(now=NOW + timedelta(seconds=122), captcha="captcha-once")
         self.assertEqual(passed.status, SendCodeStatus.ACCEPTED)
 
+    def test_default_phone_day_limit_stops_sixth_provider_send(self) -> None:
+        service = RegistrationService(
+            store=InMemoryRegistrationStore(),
+            sms_sender=self.sender,
+            captcha_verifier=InMemoryCaptchaVerifier(),
+            guardian_consent_verifier=self.guardian,
+            secret_pepper=b"p" * 32,
+            config=AuthConfig(
+                phone_hour_limit=99,
+                captcha_after_phone_day=99,
+                captcha_after_ip_hour=99,
+            ),
+        )
+        results = [
+            service.request_code(
+                phone="13800138000",
+                ip_address="203.0.113.7",
+                device_id="browser-device-001",
+                now=NOW + timedelta(hours=offset),
+            )
+            for offset in range(0, 12, 2)
+        ]
+        self.assertEqual([item.status for item in results[:5]], [SendCodeStatus.ACCEPTED] * 5)
+        self.assertEqual(results[5].status, SendCodeStatus.RETRY_LATER)
+        self.assertEqual(len(self.sender.deliveries), 5)
+
     def test_invalid_attempts_lock_challenge(self) -> None:
         sent = self.request()
         for _ in range(4):

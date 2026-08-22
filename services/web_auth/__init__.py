@@ -13,6 +13,7 @@ from .registration import (
 )
 from .asgi import AuthAsgiApp
 from .mysql_store import MySqlRegistrationStore
+from .ruicheng_sms import RuichengSmsSender, SmsProviderError
 
 __all__ = [
     "AuthConfig",
@@ -24,6 +25,8 @@ __all__ = [
     "RecordingSmsSender",
     "RegistrationResult",
     "RegistrationService",
+    "RuichengSmsSender",
     "SendCodeResult",
+    "SmsProviderError",
     "normalize_cn_mobile",
 ]

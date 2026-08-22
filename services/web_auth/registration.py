@@ -82,7 +82,7 @@ class AuthConfig:
     resend_cooldown_seconds: int = 60
     max_code_attempts: int = 5
     phone_hour_limit: int = 5
-    phone_day_limit: int = 10
+    phone_day_limit: int = 5
     ip_hour_limit: int = 20
     ip_prefix_hour_limit: int = 30
     device_hour_limit: int = 10
@@ -272,8 +272,7 @@ class InMemoryRegistrationStore:
     def count(self, dimension: str, subject_hash: str, since: datetime) -> int:
         with self._lock:
             values = self._send_times[(dimension, subject_hash)]
-            self._send_times[(dimension, subject_hash)] = [item for item in values if item >= since]
-            return len(self._send_times[(dimension, subject_hash)])
+            return sum(item >= since for item in values)
 
     def reserve_send(
         self,

@@ -4,7 +4,6 @@
 CREATE TABLE web_users (
     id CHAR(32) CHARACTER SET ascii PRIMARY KEY,
     phone_lookup_hash CHAR(64) CHARACTER SET ascii NOT NULL,
-    tenant_scope_hash CHAR(64) CHARACTER SET ascii NOT NULL,
     phone_ciphertext VARBINARY(512) NULL,
     phone_last4 CHAR(4) CHARACTER SET ascii NOT NULL,
     display_name VARCHAR(80) NOT NULL,
@@ -20,6 +19,7 @@ CREATE TABLE web_users (
 CREATE TABLE auth_sms_challenges (
     id CHAR(32) CHARACTER SET ascii PRIMARY KEY,
     phone_lookup_hash CHAR(64) CHARACTER SET ascii NOT NULL,
+    tenant_scope_hash CHAR(64) CHARACTER SET ascii NOT NULL,
     purpose ENUM('register', 'login', 'bind_phone', 'recover') NOT NULL,
     code_hash CHAR(64) CHARACTER SET ascii NOT NULL,
     status ENUM('pending', 'sent', 'verified', 'cancelled', 'expired', 'locked', 'delivery_failed') NOT NULL,

@@ -14,6 +14,7 @@ from .registration import (
 from .asgi import AuthAsgiApp
 from .mysql_store import MySqlRegistrationStore
 from .ruicheng_sms import RuichengSmsSender, SmsProviderError
+from .turnstile import TurnstileCaptchaVerifier
 
 __all__ = [
     "AuthConfig",
@@ -28,5 +29,6 @@ __all__ = [
     "RuichengSmsSender",
     "SendCodeResult",
     "SmsProviderError",
+    "TurnstileCaptchaVerifier",
     "normalize_cn_mobile",
 ]

@@ -54,6 +54,12 @@ class AuthAsgiApp:
             await self._json(send, 400, {"error": "https_required"})
             return
         path = scope.get("path")
+        if path == "/healthz":
+            if scope.get("method") != "GET":
+                await self._json(send, 405, {"error": "method_not_allowed"}, [(b"allow", b"GET")])
+                return
+            await self._json(send, 200, {"status": "ok"})
+            return
         if path not in {"/v1/auth/otp/request", "/v1/auth/otp/verify"}:
             await self._json(send, 404, {"error": "not_found"})
             return

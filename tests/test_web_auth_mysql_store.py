@@ -65,7 +65,7 @@ class MySqlRegistrationStoreTests(unittest.TestCase):
         )
 
     def test_atomic_reservation_locks_every_bucket_in_stable_order(self) -> None:
-        connection = FakeConnection([(0,)] * 7 + [(NOW.replace(tzinfo=None),)])
+        connection = FakeConnection([(0,)] * 7 + [(NOW.replace(tzinfo=None),), (0,)])
         allowed, _ = self.reserve(self.store(connection))
         self.assertTrue(allowed)
         self.assertEqual((connection.begun, connection.committed, connection.rolled_back), (1, 1, 0))
@@ -77,6 +77,23 @@ class MySqlRegistrationStoreTests(unittest.TestCase):
         self.assertEqual(len(locks), 7)
         self.assertEqual(locks, sorted(locks))
         self.assertTrue(
+            any("INSERT INTO auth_sms_send_events" in query for query, _ in connection.cursor_instance.executed)
+        )
+        self.assertTrue(
+            any(
+                "SELECT COUNT(*) FROM auth_sms_send_events" in query
+                for query, _ in connection.cursor_instance.executed
+            )
+        )
+
+    def test_rolling_phone_day_limit_cannot_reset_at_bucket_boundary(self) -> None:
+        connection = FakeConnection(
+            [(0,)] * 7 + [(NOW.replace(tzinfo=None),), (AuthConfig().phone_day_limit,)]
+        )
+        allowed, _ = self.reserve(self.store(connection))
+        self.assertFalse(allowed)
+        self.assertEqual((connection.committed, connection.rolled_back), (0, 1))
+        self.assertFalse(
             any("INSERT INTO auth_sms_send_events" in query for query, _ in connection.cursor_instance.executed)
         )
 

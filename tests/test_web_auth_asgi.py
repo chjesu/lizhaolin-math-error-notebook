@@ -37,6 +37,7 @@ class AuthAsgiTests(unittest.TestCase):
         extra_headers: list[tuple[bytes, bytes]] | None = None,
         scheme: str = "https",
         host: str = "example.test",
+        method: str = "POST",
     ) -> tuple[int, dict[str, str], dict]:
         body = json.dumps(payload).encode("utf-8")
         messages = [{"type": "http.request", "body": body, "more_body": False}]
@@ -56,7 +57,7 @@ class AuthAsgiTests(unittest.TestCase):
         headers.extend(extra_headers or [])
         scope = {
             "type": "http",
-            "method": "POST",
+            "method": method,
             "path": path,
             "scheme": scheme,
             "client": (client_ip, 12345),
@@ -135,6 +136,12 @@ class AuthAsgiTests(unittest.TestCase):
         payload = {"phone": "13800138000"}
         self.assertEqual(self.call("/v1/auth/otp/request", payload, host="evil.test")[0], 400)
         self.assertEqual(self.call("/v1/auth/otp/request", payload, scheme="http")[0], 400)
+
+    def test_health_endpoint_obeys_host_and_https_boundary(self) -> None:
+        status, _, payload = self.call("/healthz", {}, method="GET")
+        self.assertEqual((status, payload), (200, {"status": "ok"}))
+        self.assertEqual(self.call("/healthz", {}, method="GET", host="evil.test")[0], 400)
+        self.assertEqual(self.call("/healthz", {}, method="GET", scheme="http")[0], 400)
 
     def test_oversized_body_is_rejected_before_domain_call(self) -> None:
         small_app = AuthAsgiApp(

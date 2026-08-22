@@ -167,6 +167,19 @@ class MySqlRegistrationStore:
                 connection.rollback()
                 return False, retry
 
+            # The fixed day bucket protects budget windows.  This rolling count
+            # prevents a phone from receiving two full batches around midnight;
+            # the cooldown row above serializes concurrent requests for this phone.
+            cursor.execute(
+                "SELECT COUNT(*) FROM auth_sms_send_events "
+                "WHERE phone_lookup_hash=%s AND occurred_at >= %s",
+                (phone_hash, utc_now - timedelta(days=1)),
+            )
+            row = cursor.fetchone()
+            if row and int(row[0]) >= config.phone_day_limit:
+                connection.rollback()
+                return False, config.resend_cooldown_seconds
+
             for (dimension, subject, kind, window, _), count in zip(specs, counts):
                 cursor.execute(
                     "UPDATE auth_rate_limit_buckets SET request_count=%s, updated_at=%s "

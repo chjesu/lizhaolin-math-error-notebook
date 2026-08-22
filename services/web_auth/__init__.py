@@ -11,9 +11,11 @@ from .registration import (
     SendCodeResult,
     normalize_cn_mobile,
 )
+from .asgi import AuthAsgiApp
 
 __all__ = [
     "AuthConfig",
+    "AuthAsgiApp",
     "InMemoryCaptchaVerifier",
     "InMemoryGuardianConsentVerifier",
     "InMemoryRegistrationStore",

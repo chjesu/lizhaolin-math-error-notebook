@@ -292,6 +292,8 @@ def run_codex_once(
         command = [
             executable,
             "exec",
+            "-m",
+            route["model"],
             "-p",
             route["codex_profile"],
             "-c",

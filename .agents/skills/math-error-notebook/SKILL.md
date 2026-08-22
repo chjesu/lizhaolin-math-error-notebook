@@ -10,7 +10,8 @@ description: Manage a Chinese high-school math error notebook with Codex and one
 - An installed copy binds to `LIZHAOLIN_MATH_NOTEBOOK_ROOT` when set; otherwise it uses the nearest parent containing `data/math_notebook.db` or a project-local copy of this Skill. If neither exists, it uses the current directory so `init` can create a new notebook. Never search for another database after binding.
 - On Windows PowerShell, always pass `-Encoding UTF8` to `Get-Content`, and run Python entry points with `-X utf8`; do not guess encodings after mojibake appears.
 - Start routine work with one compact, read-only call: `scripts/notebook.py agent-context --task grade|recommend|verify|import|review|pdf|maintenance --json`. Use `doctor --json` for environment health and `handoff --json` for a compact transfer snapshot.
-- Use image input directly for photos; never claim to switch models/providers. The default preflight only controls image size locally, and the current remote vision-capable model must inspect every returned preview.
+- This project defaults the GUI orchestrator to Luna/low. For every bounded task that needs mathematical or visual judgment, call `scripts/codex_task_router.py`; its explicit model selection may promote the task to Terra or Sol. Deterministic extraction, preflight, validation, and database writes still go directly through the existing scripts without a model call.
+- For photos, run the local size-only preflight and attach every relevant returned preview to `codex_task_router.py run --task grade-photo`. A direct review by the current GUI model is only a disclosed fallback when the router is unavailable.
 - Text-only models, including DeepSeek sessions without image input, must hand photo grading to a vision-capable model; they must not infer unseen handwriting from filenames or OCR remnants.
 - Run deterministic work through `scripts/notebook.py`. Its project installation binds to the sole bank `data/math_notebook.db`; never discover, merge, copy over, or select another same-named DB.
 - For bounded Codex CLI model tasks, use `scripts/codex_task_router.py`: Luna handles high-throughput tagging, recommendation review, and simplified verification; Terra handles routine grading and tutoring; Sol handles full derivation, repair, generation, and adjudication. The router runs read-only, validates JSON Schema output, and never writes the database.
@@ -53,8 +54,13 @@ operation.
 python -B <skill-dir>\scripts\notebook.py photo-preflight <image...> --json
 ```
 
-The command does not run OCR or a local visual model. `review_route=remote_model_visual_review` means the preview must be viewed,
-not merely read as a path. Use the compact result directly; routine grading must
+The command does not run OCR or a local visual model. `review_route=remote_model_visual_review` means every preview must be attached to and viewed by the router-selected vision-capable model, not merely read as a path. Run a bounded task with:
+
+```powershell
+python -X utf8 -B <skill-dir>\scripts\codex_task_router.py run --task grade-photo --input <evidence.json> --image <preview...> --out <grade-result.json> --json
+```
+
+Use the compact preflight result directly; routine grading must
 not read the full packet. When a printed question ID is visible, load only
 `question <id> --compact --json`; request the full item only if its solution is
 genuinely needed.

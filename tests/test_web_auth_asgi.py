@@ -108,6 +108,7 @@ class AuthAsgiTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(payload["next_action"], "create_or_join_family")
+        self.assertEqual(payload["account_status"], "active")
         self.assertNotIn("session", payload)
         cookie = headers["set-cookie"]
         self.assertIn("HttpOnly", cookie)

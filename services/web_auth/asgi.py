@@ -170,7 +170,12 @@ class AuthAsgiApp:
             {
                 "status": "authenticated",
                 "user_id": result.user_id,
-                "next_action": "create_or_join_family",
+                "account_status": result.account_status,
+                "next_action": (
+                    "complete_guardian_consent"
+                    if result.account_status == "restricted"
+                    else "create_or_join_family"
+                ),
             },
             [(b"set-cookie", cookie)],
         )

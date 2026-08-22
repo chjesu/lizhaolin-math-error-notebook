@@ -15,7 +15,7 @@ from services.web_auth import (
     RegistrationService,
     normalize_cn_mobile,
 )
-from services.web_auth.registration import RegistrationStatus, SendCodeStatus
+from services.web_auth.registration import RegistrationStatus, SendCodeStatus, User
 
 
 NOW = datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
@@ -144,6 +144,48 @@ class RegistrationServiceTests(unittest.TestCase):
             guardian_consent_receipt="guardian-consent-verified-001",
         )
         self.assertEqual(result.status, RegistrationStatus.INVALID_CODE)
+
+    def test_existing_restricted_user_cannot_change_status_with_claimed_adult_birthdate(self) -> None:
+        sent = self.request()
+        challenge = self.store.challenges[sent.challenge_id]
+        self.store.users_by_phone[challenge.phone_hash] = User(
+            user_id="restricted-user",
+            phone_hash=challenge.phone_hash,
+            phone_last4="8000",
+            display_name="受限学生",
+            birth_date=date(2012, 1, 1),
+            guardian_consent_receipt=None,
+            created_at=NOW,
+            status="restricted",
+        )
+        result = self._register(
+            sent.challenge_id,
+            self.sender.deliveries[0][1],
+            date(2000, 1, 1),
+        )
+        self.assertEqual(result.status, RegistrationStatus.COMPLETE)
+        self.assertEqual(result.account_status, "restricted")
+
+    def test_existing_user_login_does_not_require_guardian_receipt_again(self) -> None:
+        sent = self.request()
+        challenge = self.store.challenges[sent.challenge_id]
+        self.store.users_by_phone[challenge.phone_hash] = User(
+            user_id="existing-student",
+            phone_hash=challenge.phone_hash,
+            phone_last4="8000",
+            display_name="已有学生",
+            birth_date=date(2012, 1, 1),
+            guardian_consent_receipt="existing-consent",
+            created_at=NOW,
+            status="active",
+        )
+        result = self._register(
+            sent.challenge_id,
+            self.sender.deliveries[0][1],
+            date(2012, 1, 1),
+        )
+        self.assertEqual(result.status, RegistrationStatus.COMPLETE)
+        self.assertEqual(result.account_status, "active")
 
     def test_provider_failure_does_not_leave_active_challenge(self) -> None:
         self.sender.fail = True

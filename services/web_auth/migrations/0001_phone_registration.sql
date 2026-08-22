@@ -49,6 +49,22 @@ CREATE TABLE auth_send_cooldowns (
     updated_at DATETIME(6) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE auth_sms_send_events (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    phone_lookup_hash CHAR(64) CHARACTER SET ascii NOT NULL,
+    ip_hash CHAR(64) CHARACTER SET ascii NOT NULL,
+    ip_prefix_hash CHAR(64) CHARACTER SET ascii NOT NULL,
+    device_hash CHAR(64) CHARACTER SET ascii NOT NULL,
+    tenant_scope_hash CHAR(64) CHARACTER SET ascii NOT NULL,
+    occurred_at DATETIME(6) NOT NULL,
+    KEY ix_auth_send_phone_time (phone_lookup_hash, occurred_at),
+    KEY ix_auth_send_ip_time (ip_hash, occurred_at),
+    KEY ix_auth_send_prefix_time (ip_prefix_hash, occurred_at),
+    KEY ix_auth_send_device_time (device_hash, occurred_at),
+    KEY ix_auth_send_tenant_time (tenant_scope_hash, occurred_at),
+    KEY ix_auth_send_time (occurred_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE auth_sessions (
     session_hash CHAR(64) CHARACTER SET ascii PRIMARY KEY,
     user_id CHAR(32) CHARACTER SET ascii NOT NULL,
@@ -79,7 +95,9 @@ CREATE TABLE auth_audit_events (
     phone_masked VARCHAR(16) CHARACTER SET ascii NOT NULL,
     phone_lookup_hash CHAR(64) CHARACTER SET ascii NOT NULL,
     ip_hash CHAR(64) CHARACTER SET ascii NOT NULL,
+    ip_prefix_hash CHAR(64) CHARACTER SET ascii NOT NULL,
     device_hash CHAR(64) CHARACTER SET ascii NOT NULL,
+    tenant_scope_hash CHAR(64) CHARACTER SET ascii NOT NULL,
     metadata JSON NOT NULL,
     occurred_at DATETIME(6) NOT NULL,
     KEY ix_auth_audit_phone_time (phone_lookup_hash, occurred_at),

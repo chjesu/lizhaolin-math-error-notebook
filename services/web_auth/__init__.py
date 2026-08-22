@@ -12,6 +12,7 @@ from .registration import (
     normalize_cn_mobile,
 )
 from .asgi import AuthAsgiApp
+from .mysql_store import MySqlRegistrationStore
 
 __all__ = [
     "AuthConfig",
@@ -19,6 +20,7 @@ __all__ = [
     "InMemoryCaptchaVerifier",
     "InMemoryGuardianConsentVerifier",
     "InMemoryRegistrationStore",
+    "MySqlRegistrationStore",
     "RecordingSmsSender",
     "RegistrationResult",
     "RegistrationService",

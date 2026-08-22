@@ -107,6 +107,7 @@ class RegistrationResult:
     message: str
     user_id: str | None = None
     session_token: str | None = None
+    account_status: str | None = None
 
 
 @dataclass
@@ -131,6 +132,7 @@ class User:
     birth_date: date
     guardian_consent_receipt: str | None
     created_at: datetime
+    status: str = "active"
 
 
 @dataclass(frozen=True)
@@ -376,10 +378,10 @@ class InMemoryRegistrationStore:
                     challenge.status = "locked"
                     return RegistrationStatus.LOCKED, None
                 return RegistrationStatus.INVALID_CODE, None
-            if block_for_guardian:
+            user = self.users_by_phone.get(phone_hash)
+            if user is None and block_for_guardian:
                 return RegistrationStatus.GUARDIAN_CONSENT_REQUIRED, None
             challenge.status = "verified"
-            user = self.users_by_phone.get(phone_hash)
             if user is None:
                 user = User(
                     user_id=uuid.uuid4().hex,
@@ -650,4 +652,10 @@ class RegistrationService:
         }
         if status is not RegistrationStatus.COMPLETE or user is None:
             return RegistrationResult(status, messages[status])
-        return RegistrationResult(status, messages[status], user.user_id, session_token)
+        return RegistrationResult(
+            status,
+            messages[status],
+            user.user_id,
+            session_token,
+            user.status,
+        )

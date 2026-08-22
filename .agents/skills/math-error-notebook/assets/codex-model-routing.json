@@ -102,27 +102,6 @@
       "schema": "codex-schemas/generated-question-result.schema.json",
       "minimum_confidence": 0.92,
       "instruction": "仅在题库缺少合适候选时生成一道完整高中数学题和解析。必须标记为模型生成且未验证，不得直接进入已验证题库。"
-    },
-    "web-requirements": {
-      "profile": "fast",
-      "context_task": "maintenance",
-      "schema": "codex-schemas/engineering-review-result.schema.json",
-      "minimum_confidence": 0.85,
-      "instruction": "审查一个有边界的 Web 产品需求或任务拆分，找出冲突、缺失验收标准和不必要范围。只输出候选审查意见，不修改文件。"
-    },
-    "web-implementation": {
-      "profile": "standard",
-      "context_task": "maintenance",
-      "schema": "codex-schemas/engineering-review-result.schema.json",
-      "minimum_confidence": 0.9,
-      "instruction": "审查一个有边界的 Web 实现或补丁，核对需求、正确性、测试、兼容性和可恢复性。只输出候选审查意见，不修改文件。"
-    },
-    "web-security-review": {
-      "profile": "expert",
-      "context_task": "maintenance",
-      "schema": "codex-schemas/engineering-review-result.schema.json",
-      "minimum_confidence": 0.92,
-      "instruction": "对认证、授权、隐私、多租户、限流或迁移变更执行安全审查。按严重度给出证据和修复建议；不得读取或输出密钥与个人信息，不得修改文件。"
     }
   },
   "risks": {
@@ -133,12 +112,6 @@
     "proof": "expert",
     "complex_diagram": "expert",
     "multiple_cases": "expert",
-    "generated": "expert",
-    "security": "expert",
-    "privacy": "expert",
-    "authentication": "expert",
-    "multi_tenant": "expert",
-    "data_migration": "expert",
-    "api_contract": "standard"
+    "generated": "expert"
   }
 }

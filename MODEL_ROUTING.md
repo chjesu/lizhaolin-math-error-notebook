@@ -22,9 +22,6 @@
 | 文字/照片判题、复习判定、苏格拉底引导 | Terra / medium | 证据不清或复杂推导升 Sol |
 | 完整验证、题目修复、生成题 | Sol / high | 不再循环升级 |
 | 争议题最终裁决 | Sol / xhigh | 无法确定则保持未验证 |
-| Web 需求审查 | Luna / low | API、安全或隐私风险升 Sol |
-| Web 常规实现审查 | Terra / medium | 认证、租户、迁移、安全风险升 Sol |
-| Web 安全审查 | Sol / high | 不再循环升级，重大争议交人工批准 |
 
 路由结果的 `status` 不是 `complete`，或模型/逐项置信度低于任务阈值时，路由器最多
 自动升级一次到 Sol。Sol 仍不能确定时，命令以退出码 `3` 停止，不产生可提交载荷。
@@ -54,15 +51,10 @@ python -X utf8 -B <skill-dir>\scripts\codex_task_router.py route `
 ```
 
 可用任务：`tag`、`recommend`、`verify-simplified`、`grade-text`、`grade-photo`、
-`review`、`tutor`、`verify-full`、`repair`、`adjudicate`、`generate`、
-`web-requirements`、`web-implementation`、`web-security-review`。
+`review`、`tutor`、`verify-full`、`repair`、`adjudicate`、`generate`。
 
 风险标记：`visual`、`ambiguous_visual`、`answer_conflict`、`incomplete`、`proof`、
-`complex_diagram`、`multiple_cases`、`generated`、`security`、`privacy`、
-`authentication`、`multi_tenant`、`data_migration`、`api_contract`。
-
-Web 注册、验证码发送、权限和限流的在线决策必须由确定性服务代码执行，不能交给模型。
-上述 Web 任务只用于只读需求/代码/安全审查，其结果是候选意见，不能部署、改阈值或写生产库。
+`complex_diagram`、`multiple_cases`、`generated`。
 
 ## 执行任务
 

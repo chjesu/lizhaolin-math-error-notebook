@@ -118,7 +118,7 @@ flowchart LR
 - **复习闭环**：记录作答结果、复习日期、薄弱知识点和重复错因，生成每日复习任务。
 - **试卷入库**：导入用户授权的 DOCX、PDF 及结构化题目，经过质量门和逐题审核后进入主库。
 - **低 Token 工作流**：图片尺寸控制、批量审核包、结构化决策扩展和 SymPy 预检均由本地脚本完成；远端只接收适合判读的标准化预览。
-- **Codex CLI 模型路由**：Luna 处理高吞吐任务，Terra 处理日常判题和辅导，Sol 处理完整推导、修复及争议裁决；模型不直接写题库。
+- **Codex CLI 模型路由**：Luna 处理低风险高吞吐任务，Terra 处理教学引导，Sol 直接处理判题、复习判定、完整推导、修复及争议裁决；每项任务只调用一次模型，模型不直接写题库。
 
 ## 工作流程
 
@@ -165,16 +165,17 @@ python -X utf8 -B -m pip install -r requirements-pdf.txt
 
 ### Codex CLI 自动模型路由
 
-唯一版本可按任务自动选择模型：Luna 处理高吞吐标签、推荐和简化审核，Terra
-处理日常判题与教学引导，Sol 处理完整推导、题目修复和争议裁决。模型始终运行在
-只读沙箱，输出受 JSON Schema 约束，正式写库仍经过原有质量门。
+唯一版本在调用前按任务和显式风险一次选择模型：Luna/medium 处理高吞吐标签、推荐和
+简化审核，Terra/medium 处理教学引导，Sol/high 直接处理判题、复习判定、完整推导、
+题目修复和争议裁决。模型始终运行在只读沙箱，输出受 JSON Schema 约束；低置信度结果
+直接阻断而不串行换模型重跑，正式写库仍经过原有质量门。
 
 ```powershell
 python -X utf8 -B .agents\skills\math-error-notebook\scripts\codex_task_router.py install-profiles --json
 python -X utf8 -B .agents\skills\math-error-notebook\scripts\codex_task_router.py route --task grade-photo --has-image --json
 ```
 
-完整任务表、风险升级规则和运行示例见 [`MODEL_ROUTING.md`](MODEL_ROUTING.md)。
+完整任务表、调用前风险选择规则和运行示例见 [`MODEL_ROUTING.md`](MODEL_ROUTING.md)。
 
 ## 快速开始
 

@@ -7,24 +7,26 @@
 
 项目级 `.codex/config.toml` 将新 GUI 任务默认设为 `gpt-5.6-luna / low`。GUI 模型只
 负责编排；判题、标签、推荐复核、审核验证、修复、生成和裁决等模型判断默认通过本路由器
-执行。路由器在 `codex exec` 时显式传入所选模型，因此项目级 Luna 默认不会覆盖 Terra/Sol
-路线或自动升级。
+执行。路由器在 `codex exec` 时显式传入调用前一次选定的模型，因此项目级 Luna 默认不会
+覆盖 Terra/Sol 路线，也不会在结果返回后串行调用第二个模型。
 
 导入文件解析、结构预检、数据库事务和质量门是确定性步骤，继续直接调用现有脚本，不为它们
 额外消耗模型；导入后的标签判断和逐题验证才进入路由器。
 
 ## 模型分工
 
-| 任务 | 默认路线 | 自动升级 |
+| 任务 | 单次路线 | 调用前风险处理 |
 |---|---|---|
-| 标签、推荐复核 | Luna / low | 含图升 Terra；歧义升 Sol |
-| 高质量题简化验证 | Luna / medium | 冲突、缺项、证明、复杂图形升 Sol |
-| 文字/照片判题、复习判定、苏格拉底引导 | Terra / medium | 证据不清或复杂推导升 Sol |
-| 完整验证、题目修复、生成题 | Sol / high | 不再循环升级 |
+| 标签、推荐复核 | Luna / medium | 含图选 Terra；歧义选 Sol |
+| 高质量题简化验证 | Luna / medium | 冲突、缺项、证明、复杂图形直接选 Sol |
+| 苏格拉底引导 | Terra / medium | 显式复杂风险直接选 Sol |
+| 文字/照片判题、复习判定 | Sol / high | 已是最高日常判题路线 |
+| 完整验证、题目修复、生成题 | Sol / high | 已是最高常规路线 |
 | 争议题最终裁决 | Sol / xhigh | 无法确定则保持未验证 |
 
-路由结果的 `status` 不是 `complete`，或模型/逐项置信度低于任务阈值时，路由器最多
-自动升级一次到 Sol。Sol 仍不能确定时，命令以退出码 `3` 停止，不产生可提交载荷。
+每项任务只调用一次模型。路由结果的 `status` 不是 `complete`，或模型/逐项置信度低于
+任务阈值时，命令以退出码 `3` 停止并保留审计，不产生可提交载荷；后续必须补充更清晰
+证据或由用户明确发起新的复核任务，不会自动换模型重跑。
 
 ## 安装 CLI profiles
 
@@ -99,6 +101,7 @@ python -X utf8 -B <skill-dir>\scripts\codex_task_router.py run `
 - 输入 JSON 由本地程序压缩后通过 stdin 发送，模型不再启动 shell 读取文件。
 - Codex 固定使用 `--ephemeral --sandbox read-only --output-schema`。
 - 模型正文不写入路由审计；审计只记录任务、模型、推理强度、耗时、状态和置信度。
+- 每个审计记录只包含一次模型尝试；不完整或低置信度结果记为 `blocked`。
 - 审计位于 `data/audits/codex-cli-routing/`，并明确记录 `database_modified=false`。
 - 最终写库只能通过现有 `grade-commit`、`verify-review-batch`、
   `assign-recommendations` 或 `annotate`。

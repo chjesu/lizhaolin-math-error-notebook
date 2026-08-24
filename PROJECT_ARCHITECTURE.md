@@ -453,3 +453,9 @@ A passing precheck confirms only the submitted formal expression. It never
 promotes a question, replaces `audit-item → verify-item`, or removes the
 required review of stem, diagrams, assumptions, cases, tags, provenance, and
 duplicates.
+
+## 14. Web 改造目标架构（规划中，尚未实施）
+
+Web 版的讨论纪要、PRD、技术架构、Agent 护栏、实施迁移和测试运维基线统一位于 [`docs/web/README.md`](docs/web/README.md)。目标部署为阿里云 ECS 应用/Worker、RDS MySQL 8.0 唯一生产主库和私有 OSS 文件存储。
+
+该目标态尚未实现。正式迁移和切换完成前，本文件前述 `data/math_notebook.db` 仍是唯一活动主库；不得依据规划文档创建第二个活动题库、双写 SQLite/MySQL，或让 Web 层重建现有判题、推荐、审核和 PDF 业务规则。Web 实施必须复用现有质量门，并在迁移验收后以明确切换动作更新本文件的当前系统快照。

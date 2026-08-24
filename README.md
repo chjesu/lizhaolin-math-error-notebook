@@ -301,6 +301,7 @@ Git 仓库用于保存代码、测试、配置模板、项目文档和品牌资�
 ## 文档入口
 
 - [`PROJECT_ARCHITECTURE.md`](PROJECT_ARCHITECTURE.md)：完整架构、脚本职责和防重复开发索引
+- [`docs/web/README.md`](docs/web/README.md)：Web 改造讨论纪要、PRD、技术架构、实施迁移和测试运维文档；当前为规划基线，尚未实施
 - [`MODEL_ROUTING.md`](MODEL_ROUTING.md)：Codex CLI 的 Luna、Terra、Sol 任务路由与使用方法
 - [`AGENTS.md`](AGENTS.md)：智能体工作规则与质量门
 - [`SIMPLIFIED_VERIFICATION_POLICY.md`](SIMPLIFIED_VERIFICATION_POLICY.md)：高质量来源的简化审核规则

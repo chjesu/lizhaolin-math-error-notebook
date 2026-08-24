@@ -11,7 +11,7 @@
 - 错题记录：`25`；到期复习阶段：`110`
 - 主执行器：`.agents/skills/math-error-notebook/scripts/notebook.py`
 - 组卷与打印：`.agents/skills/math-error-notebook/scripts/practice_sheet.py`
-- 照片视觉预检：`notebook.py photo-preflight`（只做 EXIF 方向、透明底白底化、尺寸压缩与缓存，远端视觉模型直接看全部预览）
+- 照片视觉预检：`notebook.py photo-preflight`（只做 EXIF 方向、透明底白底化、尺寸压缩与缓存，路由器选出的视觉模型查看全部相关预览）
 - 默认打印机：`EPSON72097C (L3250 Series)`
 
 数量是 2026-08-08 的实施前快照；实际状态以 `bank-info --json` 为准。
@@ -54,7 +54,7 @@ flowchart LR
 ```mermaid
 flowchart TD
     IMG["错题照片/文字"] --> PRE["photo-preflight：本地仅做方向、白底与尺寸控制"]
-    PRE --> G["远端视觉模型查看全部标准化预览，区分印刷内容与手写步骤"]
+    PRE --> G["路由器选出的视觉模型查看全部标准化预览，区分印刷内容与手写步骤"]
     G --> W["定位第一处实质性错误"]
     W --> J["填写 error-analysis-template.json"]
     J --> RE["record-error"]
@@ -120,7 +120,7 @@ flowchart LR
 
 新智能体不得创建第二套数据库访问层、推荐器、PDF生成器或验证器。可复用功能应扩展权威入口，并补充 `tests/test_notebook.py`。
 
-Skill 只有一个安装包：`.agents/skills/math-error-notebook`。Codex CLI 模型任务统一通过包内 `scripts/codex_task_router.py` 在 Luna、Terra 和 Sol 之间路由；安装版按
+Skill 只有一个安装包：`.agents/skills/math-error-notebook`。项目级 `.codex/config.toml` 不固定 GUI 模型；新任务继承用户级、受管默认或用户显式选择，GUI 只负责编排。所有需要模型判断的有边界任务统一通过包内 `scripts/codex_task_router.py` 在 Luna、Terra 和 Sol 之间路由。路由器显式固定每次实际选择的模型，避免 GUI 当前模型覆盖任务路线；确定性导入、预检和写库步骤不调用模型。安装版按
 `LIZHAOLIN_MATH_NOTEBOOK_ROOT`、当前目录向上的主库/项目标记、当前目录的顺序绑定项目；绑定后仍只使用该项目的 `data/math_notebook.db`，不会跨磁盘发现题库。
 
 ## 5. `notebook.py` 全部 CLI 功能
@@ -134,7 +134,7 @@ Skill 只有一个安装包：`.agents/skills/math-error-notebook`。Codex CLI �
 | 智能体交接 | `handoff` | 精简输出主库哈希、验证数量、主要问题、复习任务和 Git 状态 |
 | 行为标准 | `behavior-cases` | 按任务列出跨模型标准案例；只在需要时加载单个完整案例 |
 | 可恢复流程 | `workflow-start` / `workflow-update` / `workflow-status` | 在 `data/workflows/` 保存步骤、产物和断点，不重复已完成阶段 |
-| 照片预检 | `photo-preflight` | 仅做 EXIF 方向、透明底白底化、JPEG 编码、尺寸控制和内容哈希缓存；精简返回全部 `preview_paths` 与 `review_route=remote_model_visual_review`，由远端视觉模型逐页查看 |
+| 照片预检 | `photo-preflight` | 仅做 EXIF 方向、透明底白底化、JPEG 编码、尺寸控制和内容哈希缓存；精简返回全部 `preview_paths` 与 `review_route=remote_model_visual_review`，由路由器选出的视觉模型逐页查看 |
 | 初始化 | `init` | 创建 schema、装载知识点；主库存在时不得用来重建数据 |
 | 初始化 | `seed` | 幂等导入项目原创种子题，仅用于首次建库 |
 | 题库身份 | `bank-info` | 主库绝对路径、SHA256、schema、完整性、外键和数量 |
@@ -229,7 +229,7 @@ python -B .agents\skills\math-error-notebook\scripts\practice_sheet.py --exam-pa
 | `scripts/_test_extract.py` | 临时烟雾测试 | 预览 `docx_extractor.py` 前 5 题 | 不是生产入口 |
 | `scripts/extract_pdf_text.py` | 通用、只读 | 使用 pypdf 提取分页文本供源文件审核 | 文本型 PDF 使用；扫描 PDF 仍需远端视觉复核 |
 | `scripts/audit_deepseek_db.py` | 历史取证、只读 | 比较候选库与唯一主库，输出插入/删除/字段差异及近似题 | 只生成报告，禁止据此自动合库 |
-| `.agents/.../scripts/codex_task_router.py` + `assets/codex-model-routing.json` + `assets/codex-schemas/` | Codex CLI 只读模型路由 | 按任务和显式风险在 Luna、Terra、Sol 之间选择；本地压缩输入，经 JSON Schema 输出，低置信度最多升级一次并记录无正文审计 | 随唯一 Skill 安装；不写数据库；判题、审核和推荐结果仍须经过 `grade-preview`、`prepare-review-batch`、`assign-recommendations` 等现有质量门；详见 `MODEL_ROUTING.md` |
+| `.agents/.../scripts/codex_task_router.py` + `assets/codex-model-routing.json` + `assets/codex-schemas/` | Codex CLI 只读模型路由 | 按任务和显式风险在调用前一次选定 Luna、Terra 或 Sol；本地压缩输入并校验 JSON Schema，低置信度直接阻断，不串行重跑 | 随唯一 Skill 安装；不写数据库；判题、审核和推荐结果仍须经过 `grade-preview`、`prepare-review-batch`、`assign-recommendations` 等现有质量门；详见 `MODEL_ROUTING.md` |
 | `scripts/audit_codex_rollout.py` | 历史取证、只读 | 将 Codex rollout JSONL 脱敏并生成可审核时间线 | 仅在有操作日志文件时使用 |
 | `scripts/build_db_correction_map.py` | 专项迁移、只读 | 将重新提取的来源题映射到题库内部 ID | 只产出 correction JSON，不直接改库 |
 | `scripts/apply_question_reviews.py` | 旧版批次验证器 | 逐条调用 `annotate --verify` 应用历史审核 manifest | 新审核改用 `audit-item` + `verify-item`；不得用于批量自动验证 |
@@ -376,7 +376,7 @@ PowerShell 读取项目文本必须显式使用 `Get-Content -Encoding UTF8`，P
 
 固定流程：
 
-- 判题：`photo-preflight --task grade（本地仅规范化与缓存） → 远端视觉模型打开全部 preview_paths → question --compact（题号可见时） → grade-preview → grade-commit`；项目不启动本地识别模型，也不得整包读取 `photo-preflight.json`
+- 判题：`photo-preflight --task grade（本地仅规范化与缓存） → codex_task_router.py run --task grade-photo（附全部相关 preview_paths） → question --compact（题号可见时） → grade-preview → grade-commit`；项目不启动本地识别模型，也不得整包读取 `photo-preflight.json`
 - 推荐：`recommend-packet --limit 3 → 模型只复核精简题干 → assign-recommendations <同一packet>`；仅对个别疑难候选调用 `question <id>`，不再默认加载全部答案与长解析
 - 每日复习：`daily-review-packet → 补齐缺少的已复核推荐 → practice_sheet.py --daily-packet`；每题只暴露一个当前阶段，积压只增加 `overdue_days`，完成后按实际完成日顺延后续阶段
 - 批量 DOCX：`import_recent_docx_batch.py → audit_recent_docx_batch.py`

@@ -26,6 +26,7 @@
   "tasks": {
     "tag": {
       "profile": "fast",
+      "reasoning_effort": "medium",
       "context_task": "maintenance",
       "schema": "codex-schemas/tag-result.schema.json",
       "minimum_confidence": 0.85,
@@ -33,6 +34,7 @@
     },
     "recommend": {
       "profile": "fast",
+      "reasoning_effort": "medium",
       "context_task": "recommend",
       "schema": "codex-schemas/recommend-result.schema.json",
       "minimum_confidence": 0.85,
@@ -47,21 +49,21 @@
       "instruction": "逐题执行简化审核：核对完整性、重复项、答案解析自洽、标签和来源。发现任何疑点时不得通过，必须请求升级为独立推导。"
     },
     "grade-text": {
-      "profile": "standard",
+      "profile": "expert",
       "context_task": "grade",
       "schema": "codex-schemas/grade-result.schema.json",
       "minimum_confidence": 0.9,
       "instruction": "判定一题文字作答，定位第一处实质错误，给出完整正确解法和可执行的下一步。无直接证据不得归因为粗心。"
     },
     "grade-photo": {
-      "profile": "standard",
+      "profile": "expert",
       "context_task": "grade",
       "schema": "codex-schemas/grade-result.schema.json",
       "minimum_confidence": 0.9,
       "instruction": "查看全部随附预览图，区分印刷题目与手写作答，判定一题并定位第一处实质错误。关键内容不清时不得补造。"
     },
     "review": {
-      "profile": "standard",
+      "profile": "expert",
       "context_task": "review",
       "schema": "codex-schemas/grade-result.schema.json",
       "minimum_confidence": 0.9,

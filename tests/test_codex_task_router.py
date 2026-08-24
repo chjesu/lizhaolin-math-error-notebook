@@ -4,7 +4,9 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,14 +24,12 @@ class CodexTaskRouterTests(unittest.TestCase):
 
     def test_fast_standard_and_expert_routes(self) -> None:
         fast = router.select_route(self.config, "tag")
-        self.assertEqual((fast["model"], fast["reasoning_effort"]), ("gpt-5.6-luna", "low"))
+        self.assertEqual((fast["model"], fast["reasoning_effort"]), ("gpt-5.6-luna", "medium"))
 
-        standard = router.select_route(self.config, "grade-photo", has_images=True)
+        standard = router.select_route(self.config, "tutor")
         self.assertEqual(standard["model"], "gpt-5.6-terra")
 
-        expert = router.select_route(
-            self.config, "grade-photo", risks=["ambiguous_visual"], has_images=True
-        )
+        expert = router.select_route(self.config, "grade-photo", has_images=True)
         self.assertEqual((expert["model"], expert["reasoning_effort"]), ("gpt-5.6-sol", "high"))
 
     def test_simplified_verification_uses_luna_medium(self) -> None:
@@ -72,6 +72,54 @@ class CodexTaskRouterTests(unittest.TestCase):
             prompt = router.build_prompt(route, compact, None, 0)
             self.assertIn('输入数据：{"question":{"stem":"x^2"}}', prompt)
             self.assertNotIn(str(path), prompt)
+
+    def test_run_pins_routed_model_above_project_default(self) -> None:
+        route = router.select_route(self.config, "grade-photo", has_images=True)
+
+        def fake_run(command: list[str], **_: object) -> SimpleNamespace:
+            self.assertEqual(command[command.index("-m") + 1], "gpt-5.6-sol")
+            result_path = Path(command[command.index("-o") + 1])
+            result_path.write_text(
+                '{"status":"complete","confidence":1,"escalation_reasons":[],"payload":{}}',
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+        with patch.object(router, "codex_binary", return_value="codex"), patch.object(
+            router.subprocess, "run", side_effect=fake_run
+        ):
+            result, _ = router.run_codex_once(route, "prompt", [], 30, None)
+        self.assertEqual(result["status"], "complete")
+
+    def test_low_confidence_is_blocked_without_second_model_call(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            input_path = Path(directory) / "input.json"
+            output_path = Path(directory) / "output.json"
+            input_path.write_text('{"question":"x=1"}', encoding="utf-8")
+            args = SimpleNamespace(
+                input=str(input_path),
+                prompt_file=None,
+                out=str(output_path),
+                image=[],
+                prompt=None,
+                task="tag",
+                risk=[],
+                force_profile=None,
+                skip_preflight=True,
+                timeout=30,
+                codex_bin=None,
+            )
+            result = {
+                "status": "needs_escalation",
+                "confidence": 0.4,
+                "escalation_reasons": ["证据不足"],
+                "payload": {},
+            }
+            with patch.object(router, "run_codex_once", return_value=(result, 1.0)) as run:
+                with self.assertRaises(router.RoutingBlocked):
+                    router.run_task(args, self.config)
+            run.assert_called_once()
+            self.assertFalse(output_path.exists())
 
     def test_tag_catalogs_come_from_authoritative_project_assets(self) -> None:
         catalogs = router.local_catalogs()

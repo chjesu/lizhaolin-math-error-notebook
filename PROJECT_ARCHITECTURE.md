@@ -120,7 +120,7 @@ flowchart LR
 
 新智能体不得创建第二套数据库访问层、推荐器、PDF生成器或验证器。可复用功能应扩展权威入口，并补充 `tests/test_notebook.py`。
 
-Skill 只有一个安装包：`.agents/skills/math-error-notebook`。项目级 `.codex/config.toml` 将 GUI 新任务默认设为 Luna/low；GUI 只负责编排，所有需要模型判断的有边界任务统一通过包内 `scripts/codex_task_router.py` 在 Luna、Terra 和 Sol 之间路由。路由器显式固定每次实际选择的模型，避免项目默认覆盖 Terra/Sol 路线；确定性导入、预检和写库步骤不调用模型。安装版按
+Skill 只有一个安装包：`.agents/skills/math-error-notebook`。项目级 `.codex/config.toml` 不固定 GUI 模型；新任务继承用户级、受管默认或用户显式选择，GUI 只负责编排。所有需要模型判断的有边界任务统一通过包内 `scripts/codex_task_router.py` 在 Luna、Terra 和 Sol 之间路由。路由器显式固定每次实际选择的模型，避免 GUI 当前模型覆盖任务路线；确定性导入、预检和写库步骤不调用模型。安装版按
 `LIZHAOLIN_MATH_NOTEBOOK_ROOT`、当前目录向上的主库/项目标记、当前目录的顺序绑定项目；绑定后仍只使用该项目的 `data/math_notebook.db`，不会跨磁盘发现题库。
 
 ## 5. `notebook.py` 全部 CLI 功能

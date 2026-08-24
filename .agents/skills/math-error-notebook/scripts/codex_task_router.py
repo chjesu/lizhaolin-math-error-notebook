@@ -292,6 +292,8 @@ def run_codex_once(
         command = [
             executable,
             "exec",
+            "-m",
+            route["model"],
             "-p",
             route["codex_profile"],
             "-c",
@@ -405,91 +407,68 @@ def run_task(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]
         run_preflight(route["context_task"])
     input_text = compact_input(input_path) if input_path else None
     prompt = build_prompt(route, input_text, prompt_extra, len(images))
-    attempts: list[dict[str, Any]] = []
-    current = route
-    while True:
-        result, elapsed = run_codex_once(
-            current, prompt, images, args.timeout, args.codex_bin
+    result, elapsed = run_codex_once(route, prompt, images, args.timeout, args.codex_bin)
+    validate_envelope(result)
+    confidence = effective_confidence(result)
+    attempts = [{
+        "profile": route["profile_key"],
+        "model": route["model"],
+        "reasoning_effort": route["reasoning_effort"],
+        "elapsed_seconds": elapsed,
+        "status": result["status"],
+        "confidence": confidence,
+    }]
+    if result["status"] != "complete" or confidence < route["minimum_confidence"]:
+        metadata = {
+            "schema": "math-codex-routing-audit/v1",
+            "task": args.task,
+            "result": "blocked",
+            "attempts": attempts,
+            "reasons": result["escalation_reasons"],
+            "database_modified": False,
+        }
+        audit_path = audit_route(metadata)
+        raise RoutingBlocked(
+            f"model result requires human/clearer evidence; audit={audit_path}"
         )
-        validate_envelope(result)
-        confidence = effective_confidence(result)
-        attempts.append({
-            "profile": current["profile_key"],
-            "model": current["model"],
-            "reasoning_effort": current["reasoning_effort"],
-            "elapsed_seconds": elapsed,
-            "status": result["status"],
-            "confidence": confidence,
-        })
-        needs_more = (
-            result["status"] != "complete"
-            or confidence < current["minimum_confidence"]
-        )
-        if not needs_more:
-            payload = result["payload"]
-            validate_payload(args.task, payload)
-            if args.task in {"verify-simplified", "verify-full", "repair", "adjudicate"}:
-                payload["reviewer"] = f'codex-cli/{current["model"]}'
-            if args.task == "recommend":
-                payload["reviewer"] = f'codex-cli/{current["model"]}'
-            if args.task == "grade-photo" and payload.get("error_analysis"):
-                payload["error_analysis"]["image_path"] = str(images[0]) if images else None
-            write_json(output_path, payload)
-            analysis_output: Path | None = None
-            if args.task in {"grade-text", "grade-photo", "review"} and isinstance(
-                payload.get("error_analysis"), dict
-            ):
-                analysis_output = output_path.with_name(
-                    f"{output_path.stem}.analysis.json"
-                )
-                write_json(analysis_output, payload["error_analysis"])
-            metadata = {
-                "schema": "math-codex-routing-audit/v1",
-                "task": args.task,
-                "result": "complete",
-                "output": str(output_path.relative_to(PROJECT_ROOT)),
-                "analysis_output": (
-                    str(analysis_output.relative_to(PROJECT_ROOT))
-                    if analysis_output else None
-                ),
-                "attempts": attempts,
-                "database_modified": False,
-            }
-            audit_path = audit_route(metadata)
-            return {
-                "status": "ok",
-                "task": args.task,
-                "output": str(output_path),
-                "analysis_output": str(analysis_output) if analysis_output else None,
-                "audit": str(audit_path),
-                "attempts": attempts,
-                "database_modified": False,
-            }
 
-        if (
-            args.no_auto_escalate
-            or current["profile_key"] == "expert"
-            or args.force_profile == "expert"
-        ):
-            metadata = {
-                "schema": "math-codex-routing-audit/v1",
-                "task": args.task,
-                "result": "blocked",
-                "attempts": attempts,
-                "reasons": result["escalation_reasons"],
-                "database_modified": False,
-            }
-            audit_path = audit_route(metadata)
-            raise RoutingBlocked(
-                f"model result requires human/clearer evidence; audit={audit_path}"
-            )
-
-        current = select_route(
-            config,
-            args.task,
-            has_images=bool(images),
-            force_profile="expert",
-        )
+    payload = result["payload"]
+    validate_payload(args.task, payload)
+    if args.task in {"verify-simplified", "verify-full", "repair", "adjudicate"}:
+        payload["reviewer"] = f'codex-cli/{route["model"]}'
+    if args.task == "recommend":
+        payload["reviewer"] = f'codex-cli/{route["model"]}'
+    if args.task == "grade-photo" and payload.get("error_analysis"):
+        payload["error_analysis"]["image_path"] = str(images[0]) if images else None
+    write_json(output_path, payload)
+    analysis_output: Path | None = None
+    if args.task in {"grade-text", "grade-photo", "review"} and isinstance(
+        payload.get("error_analysis"), dict
+    ):
+        analysis_output = output_path.with_name(f"{output_path.stem}.analysis.json")
+        write_json(analysis_output, payload["error_analysis"])
+    metadata = {
+        "schema": "math-codex-routing-audit/v1",
+        "task": args.task,
+        "result": "complete",
+        "output": str(output_path.relative_to(PROJECT_ROOT)),
+        "analysis_output": (
+            str(analysis_output.relative_to(PROJECT_ROOT))
+            if analysis_output else None
+        ),
+        "attempts": attempts,
+        "database_modified": False,
+    }
+    audit_path = audit_route(metadata)
+    return {
+        "status": "ok",
+        "task": args.task,
+        "output": str(output_path),
+        "analysis_output": str(analysis_output) if analysis_output else None,
+        "audit": str(audit_path),
+        "attempts": attempts,
+        "database_modified": False,
+    }
 
 
 def print_result(payload: dict[str, Any], as_json: bool) -> None:
@@ -527,7 +506,6 @@ def build_parser(config: dict[str, Any]) -> argparse.ArgumentParser:
     run.add_argument("--out", required=True)
     run.add_argument("--timeout", type=int, default=900)
     run.add_argument("--codex-bin")
-    run.add_argument("--no-auto-escalate", action="store_true")
     run.add_argument("--skip-preflight", action="store_true")
     run.add_argument("--json", action="store_true")
     return parser

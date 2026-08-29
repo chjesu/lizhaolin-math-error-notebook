@@ -36,6 +36,7 @@
                   "answer": {"type": "string"},
                   "solution": {"type": "string"}
                 },
+                "required": ["stem", "options", "answer", "solution"],
                 "additionalProperties": false
               },
               "review_note": {"type": "string"},

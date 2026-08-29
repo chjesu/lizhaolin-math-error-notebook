@@ -1846,6 +1846,158 @@ class NotebookTests(unittest.TestCase):
         self.assertEqual(practice_sheet.identifier_label(error_id), "错题编号")
         self.assertEqual(practice_sheet.identifier_label("Q-example"), "题库编号")
 
+    def test_finalize_review_packet_is_atomic_and_idempotent(self):
+        error_id = self.create_error()
+        notebook.recommend(self.conn, error_id, 2, True, self.root)
+        packet_path = self.root / "daily-finalize.json"
+        notebook.daily_review_packet(
+            self.conn, date.today() + timedelta(days=1), 12, packet_path
+        )
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        question_id = packet["items"][0]["questions"][0]["question_id"]
+        results_path = self.root / "daily-results.json"
+        results_path.write_text(json.dumps({
+            "schema": "math-review-finalization/v1",
+            "review_date": date.today().isoformat(),
+            "items": [{
+                "error_id": error_id,
+                "result": "correct",
+                "attempts": [{"question_id": question_id, "result": "correct"}],
+            }],
+        }), encoding="utf-8")
+
+        result = notebook.finalize_review_packet(self.conn, packet_path, results_path)
+        again = notebook.finalize_review_packet(self.conn, packet_path, results_path)
+
+        self.assertEqual(result["actionable_finalized"], 1)
+        self.assertEqual(result["attempts_recorded"], 1)
+        self.assertEqual(again["skipped_idempotent"], [error_id])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0], 1)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM review_packet_items").fetchone()[0], 1
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT result FROM review_schedule WHERE id=?",
+                (packet["items"][0]["review_id"],),
+            ).fetchone()[0],
+            "correct",
+        )
+
+    def test_finalize_review_packet_requires_complete_coverage_without_writes(self):
+        error_id = self.create_error()
+        packet_path = self.root / "daily-incomplete.json"
+        notebook.daily_review_packet(
+            self.conn, date.today() + timedelta(days=1), 12, packet_path
+        )
+        results_path = self.root / "incomplete-results.json"
+        results_path.write_text(json.dumps({
+            "schema": "math-review-finalization/v1",
+            "review_date": date.today().isoformat(),
+            "items": [],
+        }), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "cover every packet error"):
+            notebook.finalize_review_packet(self.conn, packet_path, results_path)
+
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0], 0)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM review_packet_items").fetchone()[0], 0
+        )
+        self.assertIsNone(self.conn.execute(
+            "SELECT completed_at FROM review_schedule WHERE error_id=? ORDER BY stage LIMIT 1",
+            (error_id,),
+        ).fetchone()[0])
+
+    def test_unresolved_packet_item_can_later_be_finalized(self):
+        error_id = self.create_error()
+        packet_path = self.root / "daily-unclear.json"
+        notebook.daily_review_packet(
+            self.conn, date.today() + timedelta(days=1), 12, packet_path
+        )
+        results_path = self.root / "unclear-results.json"
+        base = {
+            "schema": "math-review-finalization/v1",
+            "review_date": date.today().isoformat(),
+            "items": [{"error_id": error_id, "result": "unclear"}],
+        }
+        results_path.write_text(json.dumps(base), encoding="utf-8")
+        first = notebook.finalize_review_packet(self.conn, packet_path, results_path)
+        self.assertEqual(first["unresolved"], [error_id])
+        self.assertIsNone(self.conn.execute(
+            "SELECT completed_at FROM review_schedule WHERE error_id=? ORDER BY stage LIMIT 1",
+            (error_id,),
+        ).fetchone()[0])
+
+        base["items"][0]["result"] = "partial"
+        results_path.write_text(json.dumps(base), encoding="utf-8")
+        second = notebook.finalize_review_packet(self.conn, packet_path, results_path)
+        self.assertEqual(second["actionable_finalized"], 1)
+        self.assertEqual(
+            self.conn.execute("SELECT result FROM review_packet_items").fetchone()[0],
+            "partial",
+        )
+
+    def test_finalize_review_packet_rolls_back_all_items_when_one_is_stale(self):
+        first_error = self.create_error()
+        second_error = self.create_error()
+        packet_path = self.root / "daily-stale.json"
+        notebook.daily_review_packet(
+            self.conn, date.today() + timedelta(days=1), 12, packet_path
+        )
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        packet["items"].sort(key=lambda item: item["error_id"] == second_error)
+        packet_path.write_text(json.dumps(packet), encoding="utf-8")
+        notebook.mark_review(self.conn, second_error, "correct", None, date.today())
+        results_path = self.root / "stale-results.json"
+        results_path.write_text(json.dumps({
+            "schema": "math-review-finalization/v1",
+            "review_date": date.today().isoformat(),
+            "items": [
+                {"error_id": first_error, "result": "correct"},
+                {"error_id": second_error, "result": "correct"},
+            ],
+        }), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "stale daily review packet"):
+            notebook.finalize_review_packet(self.conn, packet_path, results_path)
+
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM review_packet_items").fetchone()[0], 0
+        )
+        self.assertIsNone(self.conn.execute(
+            "SELECT completed_at FROM review_schedule WHERE error_id=? ORDER BY stage LIMIT 1",
+            (first_error,),
+        ).fetchone()[0])
+
+    def test_review_reconcile_reports_legacy_candidate_without_writing(self):
+        error_id = self.create_error()
+        question_id = notebook.recommend(
+            self.conn, error_id, 1, True, self.root
+        )[0]["question_id"]
+        self.conn.execute(
+            "UPDATE review_schedule SET due_date=? WHERE error_id=? AND stage=1",
+            (date.today().isoformat(), error_id),
+        )
+        self.conn.commit()
+        packet_path = self.root / "daily-candidate.json"
+        notebook.daily_review_packet(self.conn, date.today(), 12, packet_path)
+        notebook.record_attempt(self.conn, Namespace(
+            question_id=question_id, error_id=error_id, answer=None,
+            correct=True, cause_code=None, note=None,
+        ))
+
+        result = notebook.review_reconcile(
+            self.conn, self.root, packet_path, date.today()
+        )
+
+        self.assertEqual(result["legacy_candidate_count"], 1)
+        self.assertEqual(result["untracked_count"], 1)
+        self.assertFalse(result["database_modified"])
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM review_packet_items").fetchone()[0], 0
+        )
+
     def test_recoverable_workflow_enforces_order_and_is_idempotent(self):
         started = notebook.workflow_start(self.root, "grade", "photo batch")
         workflow_id = started["workflow_id"]
@@ -1863,6 +2015,20 @@ class NotebookTests(unittest.TestCase):
         status = notebook.workflow_status(self.root, workflow_id)
         self.assertEqual(status["steps"][0]["artifacts"], ["ocr.json"])
         self.assertEqual(again["next_step"], "model_review")
+
+    def test_workflow_status_skips_non_workflow_json_with_warning(self):
+        valid = notebook.workflow_start(self.root, "review", "daily review")
+        directory = self.root / "data" / "workflows"
+        (directory / "WF-analysis.json").write_text(
+            json.dumps({"kind": "analysis"}), encoding="utf-8"
+        )
+
+        status = notebook.workflow_status(self.root, None)
+
+        self.assertEqual(status["count"], 1)
+        self.assertEqual(status["workflows"][0]["workflow_id"], valid["workflow_id"])
+        self.assertEqual(len(status["invalid_manifests"]), 1)
+        self.assertEqual(status["warnings"], ["invalid_workflow_manifests:1"])
 
     def test_behavior_cases_are_machine_readable(self):
         listing = notebook.behavior_cases("grade", None)

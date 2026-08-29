@@ -1,0 +1,21 @@
+{
+  "schema": "math-review-finalization/v1",
+  "review_date": "YYYY-MM-DD",
+  "note": "optional packet-level note",
+  "items": [
+    {
+      "error_id": "ERR-YYYYMMDD-example",
+      "result": "correct",
+      "note": "optional error-group note",
+      "attempts": [
+        {
+          "question_id": "Q-example",
+          "result": "correct",
+          "answer": "optional submitted answer",
+          "cause_code": null,
+          "note": null
+        }
+      ]
+    }
+  ]
+}

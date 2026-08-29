@@ -252,6 +252,10 @@ python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py recomme
 python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py due --json
 python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py stats --json
 python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py coverage --json
+
+# 判完每日复习包后，原子记录作答并结算全部错题组；随后只读对账
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py finalize-review-packet <每日packet.json> <结算结果.json> --json
+python -X utf8 -B .agents\skills\math-error-notebook\scripts\notebook.py review-reconcile --packet <每日packet.json> --json
 ```
 
 ### 试卷入库与验证

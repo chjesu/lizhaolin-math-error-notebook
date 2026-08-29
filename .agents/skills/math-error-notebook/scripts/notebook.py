@@ -79,7 +79,8 @@ FEATURE_CODES = {
     "point-on-curve": "曲线上点代入",
 }
 REVIEW_INTERVALS = (1, 2, 4, 7, 15, 30)
-SCHEMA_VERSION = 2
+REVIEW_PACKET_RESULTS = {"correct", "partial", "wrong", "unclear", "not_attempted"}
+SCHEMA_VERSION = 3
 PROJECT_NAME = "李兆霖数学错题本"
 SKILL_DIR = SCRIPT_DIR.parent
 
@@ -134,6 +135,7 @@ WORKFLOW_STEPS: dict[str, tuple[str, ...]] = {
     "verify": ("audit_prepare", "model_review", "review_expand", "verify"),
     "recommend": ("candidate_packet", "model_review", "assign", "pdf"),
     "pdf": ("build", "print_optional"),
+    "review": ("packet", "model_review", "finalize", "reconcile"),
 }
 WORKFLOW_STATUSES = {"pending", "in_progress", "complete", "blocked"}
 
@@ -288,12 +290,28 @@ CREATE TABLE IF NOT EXISTS attempts (
     attempted_at TEXT NOT NULL,
     note TEXT
 );
+CREATE TABLE IF NOT EXISTS review_packet_items (
+    packet_sha256 TEXT NOT NULL,
+    packet_path TEXT NOT NULL,
+    packet_date TEXT NOT NULL,
+    error_id TEXT NOT NULL REFERENCES errors(id) ON DELETE CASCADE,
+    cycle INTEGER NOT NULL,
+    stage INTEGER NOT NULL,
+    result TEXT NOT NULL CHECK(result IN ('correct','partial','wrong','unclear','not_attempted')),
+    review_schedule_id INTEGER REFERENCES review_schedule(id),
+    attempt_ids_json TEXT NOT NULL DEFAULT '[]',
+    note TEXT,
+    result_file_sha256 TEXT NOT NULL,
+    finalized_at TEXT NOT NULL,
+    PRIMARY KEY(packet_sha256, error_id, cycle, stage)
+);
 CREATE INDEX IF NOT EXISTS idx_questions_grade_difficulty ON questions(grade, difficulty);
 CREATE INDEX IF NOT EXISTS idx_qk_knowledge ON question_knowledge(knowledge_code);
 CREATE INDEX IF NOT EXISTS idx_qf_feature ON question_features(feature_code);
 CREATE INDEX IF NOT EXISTS idx_verification_question ON verification_reviews(question_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_errors_cause ON errors(cause_code, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_reviews_due ON review_schedule(due_date, completed_at);
+CREATE INDEX IF NOT EXISTS idx_review_packet_result ON review_packet_items(result, finalized_at);
 """
 
 
@@ -1943,17 +1961,48 @@ def workflow_status(project_root: Path, workflow_id: str | None) -> dict[str, An
         if not path.is_file():
             raise ValueError(f"workflow not found: {workflow_id}")
         payload = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema") != "math-workflow/v1"
+            or payload.get("id") != workflow_id
+            or payload.get("kind") not in WORKFLOW_STEPS
+            or not isinstance(payload.get("steps"), list)
+        ):
+            raise ValueError(f"invalid workflow manifest: {path.name}")
         payload["manifest"] = str(path.resolve())
         return payload
     records = []
+    invalid_manifests = []
     paths = list(directory.glob("WF-*.json")) if directory.is_dir() else []
     for path in paths:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            invalid_manifests.append({"manifest": str(path.resolve()), "reason": str(exc)})
+            continue
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema") != "math-workflow/v1"
+            or not payload.get("id")
+            or payload.get("kind") not in WORKFLOW_STEPS
+            or not isinstance(payload.get("steps"), list)
+        ):
+            invalid_manifests.append({
+                "manifest": str(path.resolve()),
+                "reason": "not a math-workflow/v1 manifest",
+            })
+            continue
         next_step = next((item["name"] for item in payload.get("steps", []) if item.get("status") != "complete"), None)
         records.append({"workflow_id": payload["id"], "kind": payload["kind"], "label": payload.get("label"), "updated_at": payload.get("updated_at"), "next_step": next_step})
     records.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
     records = records[:20]
-    return {"workflows": records, "count": len(records), "database_modified": False}
+    return {
+        "workflows": records,
+        "count": len(records),
+        "invalid_manifests": invalid_manifests,
+        "warnings": [f"invalid_workflow_manifests:{len(invalid_manifests)}"] if invalid_manifests else [],
+        "database_modified": False,
+    }
 
 
 def behavior_cases(category: str | None, case_id: str | None) -> dict[str, Any]:
@@ -1974,7 +2023,15 @@ def behavior_cases(category: str | None, case_id: str | None) -> dict[str, Any]:
     }
 
 
-def mark_review(conn: sqlite3.Connection, error_id: str, result: str, note: str | None, on_date: date) -> dict[str, Any]:
+def mark_review(
+    conn: sqlite3.Connection,
+    error_id: str,
+    result: str,
+    note: str | None,
+    on_date: date,
+    *,
+    commit: bool = True,
+) -> dict[str, Any]:
     current = conn.execute(
         """SELECT * FROM review_schedule WHERE error_id=? AND completed_at IS NULL
            ORDER BY cycle, stage LIMIT 1""",
@@ -2006,8 +2063,14 @@ def mark_review(conn: sqlite3.Connection, error_id: str, result: str, note: str 
     ).fetchone()
     if not pending:
         conn.execute("UPDATE errors SET status='mastered' WHERE id=?", (error_id,))
-    conn.commit()
-    return {"error_id": error_id, "result": result, "next_due": pending[0] if pending else None}
+    if commit:
+        conn.commit()
+    return {
+        "review_id": current["id"],
+        "error_id": error_id,
+        "result": result,
+        "next_due": pending[0] if pending else None,
+    }
 
 
 def mark_error_mastered(conn: sqlite3.Connection, error_id: str) -> dict[str, Any]:
@@ -2121,7 +2184,9 @@ def correct_review(
     }
 
 
-def record_attempt(conn: sqlite3.Connection, args: argparse.Namespace) -> str:
+def record_attempt(
+    conn: sqlite3.Connection, args: argparse.Namespace, *, commit: bool = True
+) -> str:
     if args.cause_code and args.cause_code not in CAUSE_CODES:
         raise ValueError(f"unsupported cause_code: {args.cause_code}")
     attempt_id = slug_id("ATT")
@@ -2134,8 +2199,341 @@ def record_attempt(conn: sqlite3.Connection, args: argparse.Namespace) -> str:
         "UPDATE recommendations SET status=? WHERE error_id=? AND question_id=?",
         ("correct" if args.correct else "wrong", args.error_id, args.question_id),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return attempt_id
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _load_daily_review_packet(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise ValueError(f"daily review packet not found: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema") != "math-daily-review-packet/v1":
+        raise ValueError("unsupported daily review packet schema")
+    if not isinstance(payload.get("items"), list) or not payload.get("date"):
+        raise ValueError("invalid daily review packet")
+    return payload
+
+
+def _load_review_finalization(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise ValueError(f"review finalization file not found: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema") != "math-review-finalization/v1":
+        raise ValueError("unsupported review finalization schema")
+    if not isinstance(payload.get("items"), list):
+        raise ValueError("review finalization items must be a list")
+    return payload
+
+
+def finalize_review_packet(
+    conn: sqlite3.Connection, packet_path: Path, results_path: Path
+) -> dict[str, Any]:
+    """Atomically record recommendation attempts and settle every packet group."""
+    packet = _load_daily_review_packet(packet_path)
+    results = _load_review_finalization(results_path)
+    packet_date = date.fromisoformat(str(packet["date"]))
+    review_date = date.fromisoformat(str(results.get("review_date") or packet["date"]))
+    if review_date > date.today():
+        raise ValueError("review_date cannot be in the future")
+
+    packet_items: dict[str, dict[str, Any]] = {}
+    for item in packet["items"]:
+        error_id = item.get("error_id") if isinstance(item, dict) else None
+        if not error_id or error_id in packet_items:
+            raise ValueError("packet error_id values must be present and unique")
+        for key in ("review_id", "cycle", "stage"):
+            if not isinstance(item.get(key), int):
+                raise ValueError(f"packet item {error_id} has invalid {key}")
+        packet_items[error_id] = item
+
+    result_items: dict[str, dict[str, Any]] = {}
+    for item in results["items"]:
+        error_id = item.get("error_id") if isinstance(item, dict) else None
+        if not error_id or error_id in result_items:
+            raise ValueError("result error_id values must be present and unique")
+        result = item.get("result")
+        if result not in REVIEW_PACKET_RESULTS:
+            raise ValueError(f"unsupported review result for {error_id}: {result}")
+        attempts = item.get("attempts") or []
+        if not isinstance(attempts, list):
+            raise ValueError(f"attempts must be a list for {error_id}")
+        if result in {"unclear", "not_attempted"} and attempts:
+            raise ValueError(f"{result} cannot include attempts for {error_id}")
+        result_items[error_id] = item
+    if set(result_items) != set(packet_items):
+        missing = sorted(set(packet_items) - set(result_items))
+        extra = sorted(set(result_items) - set(packet_items))
+        raise ValueError(
+            f"results must cover every packet error exactly once; missing={missing}, extra={extra}"
+        )
+
+    normalized_attempts: dict[str, list[dict[str, Any]]] = {}
+    for error_id, result_item in result_items.items():
+        allowed_questions = {
+            question.get("question_id")
+            for question in packet_items[error_id].get("questions") or []
+            if isinstance(question, dict) and question.get("question_id")
+        }
+        seen: set[str] = set()
+        attempts = []
+        for attempt in result_item.get("attempts") or []:
+            if not isinstance(attempt, dict):
+                raise ValueError(f"invalid attempt for {error_id}")
+            question_id = attempt.get("question_id")
+            attempt_result = attempt.get("result")
+            if question_id not in allowed_questions:
+                raise ValueError(f"question {question_id} is not in packet item {error_id}")
+            if question_id in seen:
+                raise ValueError(f"duplicate attempt question for {error_id}: {question_id}")
+            if attempt_result not in {"correct", "wrong"}:
+                raise ValueError(f"invalid attempt result for {question_id}")
+            cause_code = attempt.get("cause_code")
+            if cause_code and cause_code not in CAUSE_CODES:
+                raise ValueError(f"unsupported cause_code: {cause_code}")
+            seen.add(question_id)
+            attempts.append(attempt)
+        if result_item["result"] == "correct" and any(
+            attempt["result"] == "wrong" for attempt in attempts
+        ):
+            raise ValueError(f"correct review group cannot contain a wrong attempt: {error_id}")
+        normalized_attempts[error_id] = attempts
+
+    packet_sha = _file_sha256(packet_path)
+    result_sha = _file_sha256(results_path)
+    finalized = []
+    unresolved = []
+    skipped = []
+    attempt_count = 0
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for error_id, packet_item in packet_items.items():
+            result_item = result_items[error_id]
+            result = result_item["result"]
+            key = (packet_sha, error_id, packet_item["cycle"], packet_item["stage"])
+            existing = conn.execute(
+                """SELECT result,review_schedule_id FROM review_packet_items
+                   WHERE packet_sha256=? AND error_id=? AND cycle=? AND stage=?""",
+                key,
+            ).fetchone()
+            if existing and existing["result"] not in {"unclear", "not_attempted"}:
+                if existing["result"] != result:
+                    raise ValueError(
+                        f"packet item {error_id} was already finalized as {existing['result']}; "
+                        "use correct-review/correct-attempt for corrections"
+                    )
+                skipped.append(error_id)
+                continue
+
+            note = result_item.get("note") or results.get("note")
+            attempt_ids: list[str] = []
+            review_schedule_id = None
+            if result in {"unclear", "not_attempted"}:
+                unresolved.append(error_id)
+            else:
+                current = conn.execute(
+                    """SELECT * FROM review_schedule
+                       WHERE id=? AND error_id=? AND cycle=? AND stage=?""",
+                    (
+                        packet_item["review_id"], error_id,
+                        packet_item["cycle"], packet_item["stage"],
+                    ),
+                ).fetchone()
+                first_pending = conn.execute(
+                    """SELECT id FROM review_schedule
+                       WHERE error_id=? AND completed_at IS NULL
+                       ORDER BY cycle,stage LIMIT 1""",
+                    (error_id,),
+                ).fetchone()
+                if (
+                    not current
+                    or current["completed_at"] is not None
+                    or not first_pending
+                    or first_pending["id"] != packet_item["review_id"]
+                ):
+                    raise ValueError(f"stale daily review packet item: {error_id}")
+                for attempt in normalized_attempts[error_id]:
+                    args = argparse.Namespace(
+                        question_id=attempt["question_id"],
+                        error_id=error_id,
+                        answer=attempt.get("answer"),
+                        correct=attempt["result"] == "correct",
+                        cause_code=attempt.get("cause_code"),
+                        note=attempt.get("note"),
+                    )
+                    attempt_ids.append(record_attempt(conn, args, commit=False))
+                review = mark_review(
+                    conn, error_id, result, note, review_date, commit=False
+                )
+                review_schedule_id = review["review_id"]
+                attempt_count += len(attempt_ids)
+                finalized.append({
+                    "error_id": error_id,
+                    "result": result,
+                    "review_id": review_schedule_id,
+                    "next_due": review["next_due"],
+                    "attempt_ids": attempt_ids,
+                })
+            conn.execute(
+                """INSERT INTO review_packet_items(
+                       packet_sha256,packet_path,packet_date,error_id,cycle,stage,result,
+                       review_schedule_id,attempt_ids_json,note,result_file_sha256,finalized_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(packet_sha256,error_id,cycle,stage) DO UPDATE SET
+                       result=excluded.result,
+                       review_schedule_id=excluded.review_schedule_id,
+                       attempt_ids_json=excluded.attempt_ids_json,
+                       note=excluded.note,
+                       result_file_sha256=excluded.result_file_sha256,
+                       finalized_at=excluded.finalized_at""",
+                (
+                    packet_sha, str(packet_path.resolve()), packet_date.isoformat(), error_id,
+                    packet_item["cycle"], packet_item["stage"], result,
+                    review_schedule_id, json.dumps(attempt_ids), note, result_sha, now_iso(),
+                ),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {
+        "packet": str(packet_path.resolve()),
+        "packet_sha256": packet_sha,
+        "results": str(results_path.resolve()),
+        "result_file_sha256": result_sha,
+        "review_date": review_date.isoformat(),
+        "packet_groups": len(packet_items),
+        "actionable_finalized": len(finalized),
+        "unresolved": unresolved,
+        "skipped_idempotent": skipped,
+        "attempts_recorded": attempt_count,
+        "items": finalized,
+        "database_modified": bool(finalized or unresolved),
+    }
+
+
+def review_reconcile(
+    conn: sqlite3.Connection,
+    project_root: Path,
+    packet_path: Path | None = None,
+    since: date | None = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Read-only audit for packet items that may not have been settled."""
+    if packet_path:
+        paths = [packet_path]
+    else:
+        directory = project_root / "data" / "workflows" / "daily-review"
+        paths = sorted(directory.glob("*-packet.json")) if directory.is_dir() else []
+    unresolved = [dict(row) for row in conn.execute(
+        """SELECT packet_path,packet_date,error_id,cycle,stage,result,finalized_at
+           FROM review_packet_items WHERE result IN ('unclear','not_attempted')
+           ORDER BY packet_date,error_id"""
+    )]
+    anomalies = []
+    for row in conn.execute(
+        """SELECT rpi.packet_path,rpi.error_id,rpi.cycle,rpi.stage,rpi.result,
+                  rpi.review_schedule_id,rs.completed_at,rs.result AS schedule_result
+           FROM review_packet_items rpi
+           LEFT JOIN review_schedule rs ON rs.id=rpi.review_schedule_id
+           WHERE (rpi.result IN ('correct','partial','wrong') AND
+                  (rpi.review_schedule_id IS NULL OR rs.id IS NULL OR
+                   rs.completed_at IS NULL OR rs.result<>rpi.result))
+              OR (rpi.result IN ('unclear','not_attempted') AND
+                  rpi.review_schedule_id IS NOT NULL)
+           ORDER BY rpi.packet_date,rpi.error_id"""
+    ):
+        anomalies.append(dict(row))
+
+    invalid_packets = []
+    untracked: dict[tuple[Any, ...], dict[str, Any]] = {}
+    legacy_candidates: dict[tuple[Any, ...], dict[str, Any]] = {}
+    untracked_packet_items = 0
+    scanned_packets = 0
+    scanned_items = 0
+    for path in paths:
+        try:
+            packet = _load_daily_review_packet(path)
+            packet_date = date.fromisoformat(str(packet["date"]))
+        except (ValueError, OSError, json.JSONDecodeError) as exc:
+            invalid_packets.append({"packet": str(path.resolve()), "reason": str(exc)})
+            continue
+        if since and packet_date < since:
+            continue
+        scanned_packets += 1
+        packet_sha = _file_sha256(path)
+        for item in packet["items"]:
+            scanned_items += 1
+            error_id = item.get("error_id")
+            cycle = item.get("cycle")
+            stage = item.get("stage")
+            ledger = conn.execute(
+                """SELECT result FROM review_packet_items
+                   WHERE packet_sha256=? AND error_id=? AND cycle=? AND stage=?""",
+                (packet_sha, error_id, cycle, stage),
+            ).fetchone()
+            if ledger:
+                continue
+            untracked_packet_items += 1
+            entry = {
+                "packet": str(path.resolve()),
+                "packet_date": packet_date.isoformat(),
+                "error_id": error_id,
+                "cycle": cycle,
+                "stage": stage,
+                "review_id": item.get("review_id"),
+            }
+            logical_key = (error_id, cycle, stage, item.get("review_id"))
+            if logical_key in untracked:
+                untracked[logical_key]["last_packet_date"] = packet_date.isoformat()
+                untracked[logical_key]["packet_appearances"] += 1
+            else:
+                untracked[logical_key] = {
+                    **entry,
+                    "first_packet_date": packet_date.isoformat(),
+                    "last_packet_date": packet_date.isoformat(),
+                    "packet_appearances": 1,
+                }
+            pending = conn.execute(
+                "SELECT completed_at FROM review_schedule WHERE id=? AND error_id=?",
+                (item.get("review_id"), error_id),
+            ).fetchone()
+            attempt_count = conn.execute(
+                """SELECT COUNT(*) FROM attempts
+                   WHERE error_id=? AND substr(attempted_at,1,10)=?""",
+                (error_id, packet_date.isoformat()),
+            ).fetchone()[0]
+            if pending and pending["completed_at"] is None and attempt_count:
+                legacy_candidates[logical_key] = {
+                    **entry,
+                    "same_day_attempts": attempt_count,
+                    "reason": "same-day attempts exist while the packet review stage is still pending",
+                }
+    untracked_items = list(untracked.values())
+    candidate_items = list(legacy_candidates.values())
+    detail_limit = max(1, limit)
+    return {
+        "scanned_packets": scanned_packets,
+        "scanned_items": scanned_items,
+        "untracked_items": untracked_items[:detail_limit],
+        "untracked_count": len(untracked_items),
+        "untracked_packet_item_count": untracked_packet_items,
+        "untracked_details_truncated": len(untracked_items) > detail_limit,
+        "unresolved_items": unresolved,
+        "unresolved_count": len(unresolved),
+        "ledger_anomalies": anomalies,
+        "ledger_anomaly_count": len(anomalies),
+        "legacy_candidates": candidate_items[:detail_limit],
+        "legacy_candidate_count": len(candidate_items),
+        "legacy_candidate_details_truncated": len(candidate_items) > detail_limit,
+        "invalid_packets": invalid_packets,
+        "database_modified": False,
+        "caution": "legacy_candidates are heuristic audit leads, not proof of a missed review",
+    }
 
 
 def correct_attempt(conn: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
@@ -3371,6 +3769,7 @@ def doctor(
         SKILL_DIR / "scripts" / "requirements-pdf.txt",
         SKILL_DIR / "assets" / "error-analysis-template.json",
         SKILL_DIR / "assets" / "question-review-template.json",
+        SKILL_DIR / "assets" / "review-finalization-template.json",
         SKILL_DIR / "assets" / "model-behavior-cases.json",
     )
     runtime = project_root / "runtime" / "pdf"
@@ -3409,6 +3808,19 @@ def doctor(
         warnings.append("libreoffice_not_found")
     if not config.get("printer_name"):
         warnings.append("printer_not_configured")
+    workflow_health = workflow_status(project_root, None)
+    warnings.extend(workflow_health.get("warnings") or [])
+    review_ledger_anomalies = conn.execute(
+        """SELECT COUNT(*) FROM review_packet_items rpi
+           LEFT JOIN review_schedule rs ON rs.id=rpi.review_schedule_id
+           WHERE (rpi.result IN ('correct','partial','wrong') AND
+                  (rpi.review_schedule_id IS NULL OR rs.id IS NULL OR
+                   rs.completed_at IS NULL OR rs.result<>rpi.result))
+              OR (rpi.result IN ('unclear','not_attempted') AND
+                  rpi.review_schedule_id IS NOT NULL)"""
+    ).fetchone()[0]
+    if review_ledger_anomalies:
+        warnings.append(f"review_ledger_anomalies:{review_ledger_anomalies}")
     return {
         "status": "ok" if all(checks.values()) else "error",
         "checks": checks,
@@ -3429,6 +3841,11 @@ def doctor(
             "remote_visual_review_required": True,
         },
         "search_index": search_index_status(conn),
+        "workflow_manifests": {
+            "valid": workflow_health["count"],
+            "invalid": len(workflow_health["invalid_manifests"]),
+        },
+        "review_ledger_anomalies": review_ledger_anomalies,
         "text_encoding": encoding_status,
         "printer": config.get("printer_name"),
         "libreoffice": str(_find_soffice()) if _find_soffice() else None,
@@ -3532,10 +3949,19 @@ AGENT_TASK_CONTEXT: dict[str, dict[str, Any]] = {
         "required_reference": "references/import-and-verification.md",
     },
     "review": {
+        "critical_rules": [
+            "settle a generated daily packet with finalize-review-packet so attempts and stage changes commit atomically",
+            "the finalization file must cover every packet error exactly once",
+            "unclear and not_attempted are logged without advancing the review stage",
+            "review-reconcile is read-only; legacy candidates are not proof and must not be auto-completed",
+        ],
         "commands": [
             "daily-review-packet --limit 12 --out <packet.json> --json",
-            "due --json", "attempt <question-id> --error-id <error-id> --correct|--wrong --json",
-            "review <error-id> --result correct|partial|wrong --json",
+            "finalize-review-packet <packet.json> <math-review-finalization-v1.json> --json",
+            "review-reconcile [--packet <packet.json>] [--since <YYYY-MM-DD>] --json",
+            "due --json",
+            "attempt <question-id> --error-id <error-id> --correct|--wrong --json  # legacy/manual single write",
+            "review <error-id> --result correct|partial|wrong --json  # legacy/manual single write",
             "master-error <error-id> --json", "stats --json",
         ],
     },
@@ -3995,6 +4421,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--json", action="store_true")
 
+    p = sub.add_parser(
+        "finalize-review-packet",
+        help="atomically record attempts and settle every item in a daily review packet",
+    )
+    p.add_argument("packet", type=Path)
+    p.add_argument("results", type=Path, help="math-review-finalization/v1 JSON")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser(
+        "review-reconcile",
+        help="read-only audit of packet settlement coverage and legacy candidates",
+    )
+    p.add_argument("--packet", type=Path)
+    p.add_argument("--since")
+    p.add_argument("--limit", type=int, default=100)
+    p.add_argument("--project-root", type=Path, default=DEFAULT_PROJECT_ROOT)
+    p.add_argument("--json", action="store_true")
+
     p = sub.add_parser("review", help="mark the next review stage")
     p.add_argument("error_id")
     p.add_argument("--result", choices=("correct", "partial", "wrong"), required=True)
@@ -4331,6 +4775,16 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "daily-review-packet":
                 payload = daily_review_packet(
                     conn, parse_date(args.date), max(1, min(args.limit, 50)), args.out
+                )
+            elif args.command == "finalize-review-packet":
+                payload = finalize_review_packet(conn, args.packet, args.results)
+            elif args.command == "review-reconcile":
+                payload = review_reconcile(
+                    conn,
+                    args.project_root,
+                    args.packet,
+                    date.fromisoformat(args.since) if args.since else None,
+                    args.limit,
                 )
             elif args.command == "review":
                 payload = mark_review(conn, args.error_id, args.result, args.note, parse_date(args.date))

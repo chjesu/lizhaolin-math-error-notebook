@@ -6,7 +6,7 @@
 
 - 正式项目名称：`李兆霖数学错题本`
 - 唯一活动题库：`data/math_notebook.db`
-- 数据库 schema：`2`
+- 数据库 schema：`3`
 - 题目：`7766`；已验证：`7766`；未验证：`0`
 - 错题记录：`25`；到期复习阶段：`110`
 - 主执行器：`.agents/skills/math-error-notebook/scripts/notebook.py`
@@ -153,6 +153,8 @@ Skill 只有一个安装包：`.agents/skills/math-error-notebook`。项目级 `
 | 人工推荐 | `assign-recommendations` | 用模型逐题复核后的已验证题替换自动候选 |
 | 复习到期 | `due` | 每个活动错题只返回一个当前可执行阶段；逾期按天数显示，不累计后续阶段任务 |
 | 每日复习包 | `daily-review-packet` | 每个活动错题只暴露一个当前可执行阶段；阶段1–2带2道同难度推荐，阶段3–4带1道变式，阶段5–6带1道优先略难迁移题；只使用已复核且已验证题 |
+| 每日复习结算 | `finalize-review-packet` | 要求结果完整覆盖 packet；在一个事务中写入推荐题作答、复习阶段和 packet 台账；支持幂等重放，unclear/not_attempted 不推进阶段 |
+| 复习对账 | `review-reconcile` | 只读检查 packet 覆盖、未决项、台账异常和旧流程疑似漏录候选；候选不是漏录事实，不自动补写 |
 | 复习反馈 | `review` | 记录 correct/partial/wrong，并在失败时启动新周期 |
 | 掌握确认 | `master-error` | 用户明确确认已掌握时，保留已完成复习历史并取消尚未发生的后续阶段 |
 | 复习更正 | `correct-review` | 原位更正最近一次误判，并恢复或重建对应复习周期；不重复推进阶段 |
@@ -186,7 +188,7 @@ Skill 只有一个安装包：`.agents/skills/math-error-notebook`。项目级 `
 - 数据库与标识：`default_database_path`、`connect`、`init_database`、`fingerprint`、`slug_id`、`bank_info`
 - 题目标准化：`infer_knowledge`、`infer_question_features`、`validate_feature_codes`、`normalize_difficulty`、`normalize_question`、`insert_question`
 - 导入与来源：`import_records`、`read_json_records`、`fetch_json`、`register_exam_directory`、`sync_source_manifest`、`update_source_metadata`、`list_sources`
-- 错题与复习：`create_review_cycle`、`render_error_markdown`、`validate_error_analysis`、`record_error`、`fetch_error`、`delete_error`、`review_due`、`daily_review_packet`、`mark_review`、`correct_review`、`record_attempt`、`correct_attempt`、`delete_attempt`、`set_recommendation_status`
+- 错题与复习：`create_review_cycle`、`render_error_markdown`、`validate_error_analysis`、`record_error`、`fetch_error`、`delete_error`、`review_due`、`daily_review_packet`、`finalize_review_packet`、`review_reconcile`、`mark_review`、`correct_review`、`record_attempt`、`correct_attempt`、`delete_attempt`、`set_recommendation_status`
 - 推荐：`automatic_recommendation_keywords`、`recommendation_candidate_is_usable`、`resolve_recommendation_mode`、`compact_recommendations`、`question_feature_codes`、`backfill_question_features`、`error_feature_codes`、`recommend`、`recommendation_packet`、`evaluate_recommendation_packets`、`assign_recommendations`
 - 检索与统计：`stats`、`coverage`、`list_knowledge_points`、`list_cause_codes`、`list_feature_codes`、`question_detail`、`search_questions`、`search_index_status`、`rebuild_search_index`
 - 审核与修复：`annotate_question`、`question_issue_codes`、`near_duplicate_candidates`、`audit_item`、`prepare_audit_batch`、`prepare_verification_reviews`、`apply_verification_review`、`apply_verification_review_batch`、`repair_embedded_options`、`audit_queue`、`audit_summary`
@@ -307,7 +309,7 @@ erDiagram
     }
 ```
 
-数据库共有 13 张业务/元数据表：`metadata`、`sources`、`knowledge_points`、`questions`、`question_knowledge`、`question_targets`、`question_features`、`verification_reviews`、`errors`、`error_knowledge`、`review_schedule`、`recommendations`、`attempts`。此外可在同一主库内建立 `questions_fts` 及其 FTS5 内部表和同步触发器；这些是可重建检索索引，不是第二套题库。
+数据库共有 14 张业务/元数据表：`metadata`、`sources`、`knowledge_points`、`questions`、`question_knowledge`、`question_targets`、`question_features`、`verification_reviews`、`errors`、`error_knowledge`、`review_schedule`、`recommendations`、`attempts`、`review_packet_items`。其中 `review_packet_items` 以 packet SHA、错题、周期和阶段为幂等键，连接每日复习包、判题结果、作答 ID 与被结算的复习阶段。此外可在同一主库内建立 `questions_fts` 及其 FTS5 内部表和同步触发器；这些是可重建检索索引，不是第二套题库。
 
 ## 10. 文件与目录所有权
 
@@ -378,7 +380,7 @@ PowerShell 读取项目文本必须显式使用 `Get-Content -Encoding UTF8`，P
 
 - 判题：`photo-preflight --task grade（本地仅规范化与缓存） → codex_task_router.py run --task grade-photo（附全部相关 preview_paths） → question --compact（题号可见时） → grade-preview → grade-commit`；项目不启动本地识别模型，也不得整包读取 `photo-preflight.json`
 - 推荐：`recommend-packet --limit 3 → 模型只复核精简题干 → assign-recommendations <同一packet>`；仅对个别疑难候选调用 `question <id>`，不再默认加载全部答案与长解析
-- 每日复习：`daily-review-packet → 补齐缺少的已复核推荐 → practice_sheet.py --daily-packet`；每题只暴露一个当前阶段，积压只增加 `overdue_days`，完成后按实际完成日顺延后续阶段
+- 每日复习：`daily-review-packet → 补齐缺少的已复核推荐 → practice_sheet.py --daily-packet → 判题 → finalize-review-packet → review-reconcile`；只要照片或文档可由标题、页脚、复习日期、`error_id`、阶段或推荐题号识别为该 PDF，普通“判一下”也必须自动进入整包结算，不等待另行申请完成阶段；结算文件必须覆盖每个错题组，作答与阶段在同一事务写入；同日期 packet 内容不匹配时停止写入，不得猜测或替换；每题只暴露一个当前阶段，积压只增加 `overdue_days`，完成后按实际完成日顺延后续阶段
 - 批量 DOCX：`import_recent_docx_batch.py → audit_recent_docx_batch.py`
 - 验证：`audit-summary → audit-queue/prepare-audit-batch [--simplified-only] → 模型输出携带 packet_sha256 的精简决策 → prepare-review-batch（首次快照校验） → verify-review-batch（写库前再次校验）`
 - 长任务：`workflow-start → workflow-update → workflow-status`，断线或更换模型后从未完成步骤继续

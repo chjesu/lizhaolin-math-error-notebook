@@ -57,11 +57,25 @@ class CodexTaskRouterTests(unittest.TestCase):
             self.assertIn('model = "gpt-5.6-terra"', text)
 
     def test_all_output_schemas_are_valid_json_objects(self) -> None:
+        def assert_strict_objects(value: object) -> None:
+            if isinstance(value, dict):
+                if value.get("type") == "object" and value.get("additionalProperties") is False:
+                    self.assertEqual(
+                        set(value.get("required", [])),
+                        set(value.get("properties", {})),
+                    )
+                for nested in value.values():
+                    assert_strict_objects(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    assert_strict_objects(nested)
+
         for task in self.config["tasks"].values():
             path = router.ROUTING_CONFIG.parent / task["schema"]
             schema = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(schema["type"], "object")
             self.assertFalse(schema["additionalProperties"])
+            assert_strict_objects(schema)
 
     def test_prompt_embeds_compact_input_without_requiring_shell_read(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

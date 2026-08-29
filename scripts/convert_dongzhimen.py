@@ -36,7 +36,7 @@ for q in questions:
         "question_type": qtype,
         "difficulty": diff,
         "source_name": "北京市东直门中学2025-2026学年高二下学期期末考试数学试题",
-        "source_url": "https://zujuan.xkw.com/11p3365591.html",
+        "source_url": None,
         "source_year": "2026",
         "license": "User-Provided",
         "verified": 0

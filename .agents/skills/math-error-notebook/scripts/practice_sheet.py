@@ -662,7 +662,8 @@ def _normalize_line_symbol(latex: str) -> str:
 
 def _normalize_render_latex(latex: str) -> str:
     """Return the canonical LaTeX string consumed by the PDF renderer."""
-    value = _normalize_math_args(latex)
+    value = latex.replace("⟨", r"\langle ").replace("⟩", r"\rangle ")
+    value = _normalize_math_args(value)
     value = _normalize_slash_fractions(value)
     return _normalize_line_symbol(value)
 
